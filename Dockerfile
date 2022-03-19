@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 GO111MODULE=on go build -mod=vendor -a -o manager main.go \
   && CGO_ENABLED=0 GO111MODULE=on go build -mod=vendor -a -o daemon ./cmd/daemon/main.go
 
 # Use Ubuntu 20.04 LTS as base image to package the manager binary
-FROM ubuntu:focal
+FROM ubuntu:20.04
 # This is required by daemon connnecting with cri
 RUN ln -s /usr/bin/* /usr/sbin/ && apt-get update -y \
   && apt-get install --no-install-recommends -y ca-certificates \
