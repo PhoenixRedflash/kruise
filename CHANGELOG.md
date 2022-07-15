@@ -1,5 +1,215 @@
 # Change Log
 
+## v1.2.0
+
+> Change log since v1.1.0
+
+### New CRD and Controller: PersistentPodState
+
+With the development of cloud native, more and more companies start to deploy stateful services (e.g., Etcd, MQ) using Kubernetes.
+K8S StatefulSet is a workload for managing stateful services, and it considers the deployment characteristics of stateful services in many aspects.
+However, StatefulSet persistent only limited pod state, such as Pod Name is ordered and unchanging, PVC persistence,
+and can not cover other states, e.g. Pod IP retention, priority scheduling to previously deployed Nodes.
+
+So we provide `PersistentPodState` CRD to persistent other states of the Pod, such as "IP Retention".
+
+For more detail, please refer to its [documentation](https://openkruise.io/docs/user-manuals/persistentpodstate) and [proposal](https://github.com/openkruise/kruise/blob/master/docs/proposals/20220421-persistent-pod-state.md).
+
+### CloneSet
+
+- Ensure at least one pod is upgraded if CloneSet has `partition < 100%` **(Behavior Change)**. ([#954](https://github.com/openkruise/kruise/pull/954), [@veophi](https://github.com/veophi))
+- Add `expectedUpdatedReplicas` field into CloneSet status. ([#954](https://github.com/openkruise/kruise/pull/954) & [#963](https://github.com/openkruise/kruise/pull/963), [@veophi](https://github.com/veophi))
+- Add `markPodNotReady` field into lifecycle hook to support marking Pod as NotReady during preparingDelete or preparingUpdate. ([#979](https://github.com/openkruise/kruise/pull/979), [@veophi](https://github.com/veophi))
+
+### StatefulSet
+
+- Add `markPodNotReady` field into lifecycle hook to support marking Pod as NotReady during preparingDelete or preparingUpdate. ([#979](https://github.com/openkruise/kruise/pull/979), [@veophi](https://github.com/veophi))
+
+### PodUnavailableBudget
+
+- Support to protect any custom workloads with scale subresource. ([#982](https://github.com/openkruise/kruise/pull/982), [@zmberg](https://github.com/zmberg))
+- Optimize performance in large-scale clusters by avoiding DeepCopy list. ([#955](https://github.com/openkruise/kruise/pull/955), [@zmberg](https://github.com/zmberg))
+
+### Others
+
+- Remove some commented code and simplify some. ([#983](https://github.com/openkruise/kruise/pull/983), [@hezhizhen](https://github.com/hezhizhen))
+- Sidecarset forbid updating of sidecar container name. ([#937](https://github.com/openkruise/kruise/pull/937), [@adairxie](https://github.com/adairxie))
+- Optimize the logic of listNamespacesForDistributor func. ([#952](https://github.com/openkruise/kruise/pull/952), [@hantmac](https://github.com/hantmac))
+
+## v1.1.0
+
+> Change log since v1.0.1
+
+### Project
+
+- Bump Kubernetes dependencies to 1.22 and controller-runtime to v0.10.2. ([#915](https://github.com/openkruise/kruise/pull/915), [@FillZpp](https://github.com/FillZpp))
+- Disable DeepCopy for some specific cache list. ([#916](https://github.com/openkruise/kruise/pull/916), [@FillZpp](https://github.com/FillZpp))
+
+### InPlace Update
+
+- Support in-place update containers with launch priority, for workloads that supported in-place update, e.g., CloneSet, Advanced StatefulSet. ([#909](https://github.com/openkruise/kruise/pull/909), [@FillZpp](https://github.com/FillZpp))
+
+### CloneSet
+
+- Add `pod-template-hash` label into Pods, which will always be the short hash. ([#931](https://github.com/openkruise/kruise/pull/931), [@FillZpp](https://github.com/FillZpp))
+- Support pre-download image after a number of updated pods has been ready. ([#904](https://github.com/openkruise/kruise/pull/904), [@shiyan2016](https://github.com/shiyan2016))
+- Make maxUnavailable also limited to pods in new revision. ([#899](https://github.com/openkruise/kruise/pull/899), [@FillZpp](https://github.com/FillZpp))
+
+### Advanced DaemonSet
+
+- Refactor daemonset controller and fetch upstream codebase. ([#883](https://github.com/openkruise/kruise/pull/883), [@FillZpp](https://github.com/FillZpp))
+- Support preDelete lifecycle for both scale down and recreate update. ([#923](https://github.com/openkruise/kruise/pull/923), [@FillZpp](https://github.com/FillZpp))
+- Fix node event handler that should compare update selector matching changed. ([#920](https://github.com/openkruise/kruise/pull/920), [@LastNight1997](https://github.com/LastNight1997))
+- Optimize `dedupCurHistories` func in ReconcileDaemonSet. ([#912](https://github.com/openkruise/kruise/pull/912), [@LastNight1997](https://github.com/LastNight1997))
+
+### Advanced StatefulSet
+
+- Support StatefulSetAutoDeletePVC feature. ([#882](https://github.com/openkruise/kruise/pull/882), [@veophi](https://github.com/veophi))
+
+### SidecarSet
+
+- Support shared volumes in init containers. ([#929](https://github.com/openkruise/kruise/pull/929), [@outgnaY](https://github.com/outgnaY))
+- Support transferEnv in init containers. ([#897](https://github.com/openkruise/kruise/pull/897), [@pigletfly](https://github.com/pigletfly))
+- Optimize the injection for pod webhook that checks container exists. ([#927](https://github.com/openkruise/kruise/pull/927), [@zmberg](https://github.com/zmberg))
+- Fix validateSidecarConflict to avoid a same sidecar container exists in multiple sidecarsets. ([#884](https://github.com/openkruise/kruise/pull/884), [@pigletfly](https://github.com/pigletfly))
+
+### Kruise-daemon
+
+- Support CRI-O and any other common CRI types. ([#930](https://github.com/openkruise/kruise/pull/930), [@diannaowa](https://github.com/diannaowa)) & ([#936](https://github.com/openkruise/kruise/pull/936), [@FillZpp](https://github.com/FillZpp))
+
+### Other
+
+- Add `kruise_manager_is_leader` metric. ([#917](https://github.com/openkruise/kruise/pull/917), [@hatowang](https://github.com/hatowang))
+
+## v1.0.1
+
+> Change log since v1.0.0
+
+### SidecarSet
+
+- Fix panic when SidecarSet manages Pods with sidecar containers that have different update type. ([#850](https://github.com/openkruise/kruise/pull/850), [@veophi](https://github.com/veophi))
+- Fix log error when extract container from fieldpath failed. ([#860](https://github.com/openkruise/kruise/pull/860), [@pigletfly](https://github.com/pigletfly))
+- Optimization logic of determining whether the pod state is consistent logic. ([#854](https://github.com/openkruise/kruise/pull/854), [@dafu-wu](https://github.com/dafu-wu))
+- Replace reflect with generation in event handler. ([#885](https://github.com/openkruise/kruise/pull/885), [@zouyee](https://github.com/zouyee))
+- Store history revisions for sidecarset. ([#715](https://github.com/openkruise/kruise/pull/715), [@veophi](https://github.com/veophi))
+
+### Advanced StatefulSet
+
+- Allow updating asts RevisionHistoryLimit. ([#864](https://github.com/openkruise/kruise/pull/864), [@shiyan2016](https://github.com/shiyan2016))
+- StatefulSet considers non-available pods when deleting pods. ([#880](https://github.com/openkruise/kruise/pull/880), [@hzyfox](https://github.com/hzyfox))
+
+### ResourceDistribution
+
+- Improve controller updating and watching logic. ([#861](https://github.com/openkruise/kruise/pull/861), [@veophi](https://github.com/veophi))
+
+### CloneSet
+
+- Break the loop when it finds the current revision. ([#887](https://github.com/openkruise/kruise/pull/887), [@shiyan2016](https://github.com/shiyan2016))
+- Remove duplicate register fieldindexes in cloneset controller. ([#888](https://github.com/openkruise/kruise/pull/888) & [#889](https://github.com/openkruise/kruise/pull/889), [@shiyan2016](https://github.com/shiyan2016))
+- CloneSet refresh pod states before skipping update when paused **(Behavior Change)**. ([#893](https://github.com/openkruise/kruise/pull/893), [@FillZpp](https://github.com/FillZpp))
+
+### PullImageJob
+
+- Update containerd client usage and event handler for controller. ([#894](https://github.com/openkruise/kruise/pull/894), [@FillZpp](https://github.com/FillZpp))
+
+## v0.10.2
+
+> Change log since v0.10.1
+
+### SidecarSet
+
+- Add SourceContainerNameFrom and EnvNames in sidecarset transferenv.
+
+### Advanced StatefulSet
+
+- Fix update expectation to be increased when a pod updated.
+
+### WorkloadSpread
+
+- Fix bug: read conditions from nil old subset status.
+
+### Other
+
+- Do not set timeout for webhook ready.
+
+## v1.0.0
+
+> Change log since v0.10.1
+
+### Project
+
+- Bump CustomResourceDefinition(CRD) from v1beta1 to v1
+- Bump ValidatingWebhookConfiguration/MutatingWebhookConfiguration from v1beta1 to v1
+- Bump dependencies: k8s v1.18 -> v1.20, controller-runtime v0.6.5 -> v0.8.3
+- Generate CRDs with original controller-tools and markers
+
+**So that Kruise can install into Kubernetes 1.22 and no longer support Kubernetes < 1.16.**
+
+### New feature: in-place update with env from metadata
+
+When update `spec.template.metadata.labels/annotations` in CloneSet or Advanced StatefulSet and there exists container env from the changed labels/annotations,
+Kruise will in-place update them to renew the env value in containers.
+
+[doc](https://openkruise.io/docs/core-concepts/inplace-update#understand-inplaceifpossible)
+
+### New feature: ContainerLaunchPriority
+
+Container Launch Priority provides a way to help users control the sequence of containers start in a Pod.
+
+It works for Pod, no matter what kind of owner it belongs to, which means Deployment, CloneSet or any other Workloads are all supported.
+
+[doc](https://openkruise.io/docs/user-manuals/containerlaunchpriority)
+
+### New feature: ResourceDistribution
+
+For the scenario, where the namespace-scoped resources such as Secret and ConfigMap need to be distributed or synchronized to different namespaces,
+the native k8s currently only supports manual distribution and synchronization by users one-by-one, which is very inconvenient.
+
+Therefore, in the face of these scenarios that require the resource distribution and **continuously synchronization across namespaces**, we provide a tool, namely **ResourceDistribution**, to do this automatically.
+
+Currently, ResourceDistribution supports the two kind resources --- **Secret & ConfigMap**.
+
+[doc](https://openkruise.io/docs/user-manuals/resourcedistribution)
+
+### CloneSet
+
+- Add `maxUnavailable` field in `scaleStrategy` to support rate limiting of scaling up.
+- Mark revision stable as `currentRevision` when all pods updated to it, won't wait all pods to be ready **(Behavior Change)**.
+
+### WorkloadSpread
+
+- Manage the pods that were created before WorkloadSpread.
+- Optimize webhook update and retry during injection.
+
+### PodUnavailableBudget
+
+- Add pod no pub-protection annotation.
+- PUB controller watch workload replicas changed.
+
+### Advanced DaemonSet
+
+- Support in-place update daemon pod.
+- Support progressive annotation to control if pods creation should be limited by partition.
+
+### SidecarSet
+
+- Fix SidecarSet filter active pods.
+
+### UnitedDeployment
+
+- Fix pod NodeSelectorTerms length 0 when UnitedDeployment NodeSelectorTerms is nil.
+
+### NodeImage
+
+- Add `--nodeimage-creation-delay` flag to delay NodeImage creation after Node ready.
+
+### Other
+
+- Kruise-daemon watch pods using protobuf.
+- Export resync seconds args.
+- Fix http checker reload ca.cert.
+- Fix E2E for WorkloadSpread, ImagePulling, ContainerLaunchPriority.
+
 ## v1.0.0-beta.0
 
 > Change log since v1.0.0-alpha.2

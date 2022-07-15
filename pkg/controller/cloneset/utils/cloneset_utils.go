@@ -24,8 +24,10 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/features"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
+	"github.com/openkruise/kruise/pkg/util/requeueduration"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,8 +46,10 @@ var (
 	WriteRevisionHash   = RevisionAdapterImpl.WriteRevisionHash
 
 	ScaleExpectations           = expectations.NewScaleExpectations()
-	UpdateExpectations          = expectations.NewUpdateExpectations(RevisionAdapterImpl)
 	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
+
+	// DurationStore is a short cut for any sub-functions to notify the reconcile how long to wait to requeue
+	DurationStore = requeueduration.DurationStore{}
 )
 
 type revisionAdapterImpl struct {
@@ -56,20 +60,26 @@ func (r *revisionAdapterImpl) EqualToRevisionHash(_ string, obj metav1.Object, h
 	if objHash == hash {
 		return true
 	}
-	return r.getShortHash(hash) == r.getShortHash(objHash)
+	return GetShortHash(hash) == GetShortHash(objHash)
 }
 
 func (r *revisionAdapterImpl) WriteRevisionHash(obj metav1.Object, hash string) {
 	if obj.GetLabels() == nil {
 		obj.SetLabels(make(map[string]string, 1))
 	}
+	// Note that controller-revision-hash defaults to be "{CLONESET_NAME}-{HASH}",
+	// and it will be "{HASH}" if CloneSetShortHash feature-gate has been enabled.
+	// But pod-template-hash should always be the short format.
+	shortHash := GetShortHash(hash)
 	if utilfeature.DefaultFeatureGate.Enabled(features.CloneSetShortHash) {
-		hash = r.getShortHash(hash)
+		obj.GetLabels()[apps.ControllerRevisionHashLabelKey] = shortHash
+	} else {
+		obj.GetLabels()[apps.ControllerRevisionHashLabelKey] = hash
 	}
-	obj.GetLabels()[apps.ControllerRevisionHashLabelKey] = hash
+	obj.GetLabels()[apps.DefaultDeploymentUniqueLabelKey] = shortHash
 }
 
-func (r *revisionAdapterImpl) getShortHash(hash string) string {
+func GetShortHash(hash string) string {
 	// This makes sure the real hash must be the last '-' substring of revision name
 	// vendor/k8s.io/kubernetes/pkg/controller/history/controller_history.go#82
 	list := strings.Split(hash, "-")
@@ -84,7 +94,7 @@ func GetControllerKey(cs *appsv1alpha1.CloneSet) string {
 // GetActivePods returns all active pods in this namespace.
 func GetActivePods(reader client.Reader, opts *client.ListOptions) ([]*v1.Pod, error) {
 	podList := &v1.PodList{}
-	if err := reader.List(context.TODO(), podList, opts); err != nil {
+	if err := reader.List(context.TODO(), podList, opts, utilclient.DisableDeepCopy); err != nil {
 		return nil, err
 	}
 

@@ -1,6 +1,9 @@
 package apps
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
@@ -12,7 +15,6 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	utilpointer "k8s.io/utils/pointer"
-	"time"
 )
 
 var _ = SIGDescribe("EphemeralJob", func() {
@@ -27,6 +29,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 		c = f.ClientSet
 		kc = f.KruiseClientSet
 		ns = f.Namespace.Name
+
+		if v, err := c.Discovery().ServerVersion(); err != nil {
+			framework.Logf("Failed to discovery server version: %v", err)
+		} else if minor, err := strconv.Atoi(v.Minor); err != nil || minor < 22 {
+			ginkgo.Skip("Skip EphemeralJob e2e for currently it can only run in K8s >= 1.22, got " + v.String())
+		}
+
 		tester = framework.NewEphemeralJobTester(c, kc, ns)
 		randStr = rand.String(10)
 	})
@@ -41,12 +50,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			tester.DeleteDeployments(ns)
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create ephemeral running succeed job", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 5, []v1.Container{
 				{
 					Name:  "nginx",
-					Image: "nginx:1.9.1",
+					Image: NginxImage,
 				},
 			})
 
@@ -59,7 +69,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						Command:                  []string{"sleep", "3"},
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -68,6 +78,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 
 			ginkgo.By("Check the status of job")
 
+			//time.Sleep(time.Second * 30)
 			gomega.Eventually(func() int32 {
 				ejob, err := tester.GetEphemeralJob(job.Name)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -75,12 +86,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			}, 60*time.Second, 3*time.Second).Should(gomega.Equal(int32(4)))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create ephemeral running err command job", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 10, []v1.Container{
 				{
 					Name:            "nginx",
-					Image:           "nginx:1.9.1",
+					Image:           NginxImage,
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			})
@@ -94,7 +106,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"sdkfjk"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -110,12 +122,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			}, 60*time.Second, 10*time.Second).Should(gomega.Equal(int32(10)))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create ephemeral running activeDeadlineSeconds", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 1, []v1.Container{
 				{
 					Name:            "nginx",
-					Image:           "nginx:1.9.1",
+					Image:           NginxImage,
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			})
@@ -136,7 +149,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 								TargetContainerName: "nginx",
 								EphemeralContainerCommon: v1.EphemeralContainerCommon{
 									Name:                     "debugger",
-									Image:                    "busybox:latest",
+									Image:                    BusyboxImage,
 									Command:                  []string{"sleep", "9999"},
 									ImagePullPolicy:          v1.PullIfNotPresent,
 									TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -155,12 +168,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			}, 60*time.Second, 10*time.Second).Should(gomega.Equal(appsv1alpha1.EphemeralJobFailed))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create ephemeral running error exit job", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 10, []v1.Container{
 				{
 					Name:            "nginx",
-					Image:           "nginx:1.9.1",
+					Image:           NginxImage,
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			})
@@ -174,7 +188,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"ls", "sdfewasf"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -190,12 +204,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			}, 60*time.Second, 10*time.Second).Should(gomega.Equal(int32(10)))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create two ephemeral running job", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 1, []v1.Container{
 				{
 					Name:            "nginx",
-					Image:           "nginx:1.9.1",
+					Image:           NginxImage,
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			})
@@ -210,7 +225,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"sleep", "3000"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -225,7 +240,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger2",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"sleep", "30"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -245,12 +260,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			}, 60*time.Second, 3*time.Second).Should(gomega.Equal(2))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("create ephemeral running two job, but to one target", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 1, []v1.Container{
 				{
 					Name:            "nginx",
-					Image:           "nginx:1.9.1",
+					Image:           NginxImage,
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			})
@@ -265,7 +281,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"sleep", "3000"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -280,7 +296,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						Command:                  []string{"sleep", "3000"},
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -292,7 +308,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			gomega.Eventually(func() int {
 				job, _ := tester.GetEphemeralJob(job1.Name)
 				return int(job.Status.Running)
-			}, 60*time.Second, 3*time.Second).Should(gomega.Equal(1))
+			}, 180*time.Second, 3*time.Second).Should(gomega.Equal(1))
 
 			gomega.Eventually(func() int {
 				targetPods, err := tester.GetPodsByEjob(job1.Name)
@@ -322,12 +338,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			tester.DeleteDeployments(ns)
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("check ttl", func() {
 			ginkgo.By("Create Deployment and wait Pods ready")
 			tester.CreateTestDeployment(randStr, 1, []v1.Container{
 				{
 					Name:  "nginx",
-					Image: "nginx:1.9.1",
+					Image: NginxImage,
 				},
 			})
 
@@ -347,7 +364,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 								TargetContainerName: "nginx",
 								EphemeralContainerCommon: v1.EphemeralContainerCommon{
 									Name:                     "debugger",
-									Image:                    "busybox:latest",
+									Image:                    BusyboxImage,
 									Command:                  []string{"sleep", "3"},
 									ImagePullPolicy:          v1.PullIfNotPresent,
 									TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -375,12 +392,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			tester.DeleteDeployments(ns)
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("test ephemeral container in in-place-update", func() {
 			// create cloneset
 			ginkgo.By("Create CloneSet " + randStr)
 			cloneSetTester := framework.NewCloneSetTester(c, kc, ns)
 			cs := cloneSetTester.NewCloneSet("clone-"+randStr, 1, appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType})
-			cs.Spec.Template.Spec.Containers[0].Image = "nginx:alpine"
+			cs.Spec.Template.Spec.Containers[0].Image = NginxImage
 			cs.Spec.Template.ObjectMeta.Labels["run"] = "nginx"
 			cs, err := cloneSetTester.CreateCloneSet(cs)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -410,7 +428,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						Command:                  []string{"sleep", "99999"},
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -435,12 +453,12 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			oldPodUID := pods[0].UID
 			oldEphemeralContainers := pods[0].Status.EphemeralContainerStatuses[0]
 
-			ginkgo.By("Update image to nginx:mainline-alpine")
+			ginkgo.By("Update image to new nginx")
 			err = cloneSetTester.UpdateCloneSet(cs.Name, func(cs *appsv1alpha1.CloneSet) {
 				if cs.Annotations == nil {
 					cs.Annotations = map[string]string{}
 				}
-				cs.Spec.Template.Spec.Containers[0].Image = "nginx:mainline-alpine"
+				cs.Spec.Template.Spec.Containers[0].Image = NewNginxImage
 			})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -469,12 +487,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			gomega.Expect(newEphemeralContainers.ContainerID).NotTo(gomega.Equal(oldEphemeralContainers.ContainerID))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("test ephemeral container in crr", func() {
 			// create cloneset
 			ginkgo.By("Create CloneSet " + randStr)
 			cloneSetTester := framework.NewCloneSetTester(c, kc, ns)
 			cs := cloneSetTester.NewCloneSet("clone-"+randStr, 1, appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType})
-			cs.Spec.Template.Spec.Containers[0].Image = "nginx:alpine"
+			cs.Spec.Template.Spec.Containers[0].Image = NginxImage
 			cs.Spec.Template.ObjectMeta.Labels["run"] = "nginx"
 			cs, err := cloneSetTester.CreateCloneSet(cs)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -504,7 +523,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						Command:                  []string{"sleep", "99999"},
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,
@@ -590,12 +609,13 @@ var _ = SIGDescribe("EphemeralJob", func() {
 			gomega.Expect(newEphemeralContainers.ContainerID).NotTo(gomega.Equal(oldEphemeralContainers.ContainerID))
 		})
 
+		// This can't be Conformance yet.
 		ginkgo.It("test ephemeral container impact main container", func() {
 			// create cloneset
 			ginkgo.By("Create CloneSet " + randStr)
 			cloneSetTester := framework.NewCloneSetTester(c, kc, ns)
 			cs := cloneSetTester.NewCloneSet("clone-"+randStr, 1, appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType})
-			cs.Spec.Template.Spec.Containers[0].Image = "nginx:alpine"
+			cs.Spec.Template.Spec.Containers[0].Image = NginxImage
 			cs.Spec.Template.ObjectMeta.Labels["run"] = "nginx"
 			cs, err := cloneSetTester.CreateCloneSet(cs)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -632,7 +652,7 @@ var _ = SIGDescribe("EphemeralJob", func() {
 					TargetContainerName: "nginx",
 					EphemeralContainerCommon: v1.EphemeralContainerCommon{
 						Name:                     "debugger",
-						Image:                    "busybox:latest",
+						Image:                    BusyboxImage,
 						Command:                  []string{"sleep", "99999"},
 						ImagePullPolicy:          v1.PullIfNotPresent,
 						TerminationMessagePolicy: v1.TerminationMessageReadFile,

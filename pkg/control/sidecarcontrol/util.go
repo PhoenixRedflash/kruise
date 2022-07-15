@@ -38,6 +38,8 @@ import (
 )
 
 const (
+	SidecarSetKindName = "kruise.io/sidecarset-name"
+
 	// SidecarSetHashAnnotation represents the key of a sidecarSet hash
 	SidecarSetHashAnnotation = "kruise.io/sidecarset-hash"
 	// SidecarSetHashWithoutImageAnnotation represents the key of a sidecarset hash without images of sidecar
@@ -62,10 +64,11 @@ var (
 )
 
 type SidecarSetUpgradeSpec struct {
-	UpdateTimestamp metav1.Time `json:"updateTimestamp"`
-	SidecarSetHash  string      `json:"hash"`
-	SidecarSetName  string      `json:"sidecarSetName"`
-	SidecarList     []string    `json:"sidecarList"`
+	UpdateTimestamp              metav1.Time `json:"updateTimestamp"`
+	SidecarSetHash               string      `json:"hash"`
+	SidecarSetName               string      `json:"sidecarSetName"`
+	SidecarList                  []string    `json:"sidecarList"`        // sidecarSet container list
+	SidecarSetControllerRevision string      `json:"controllerRevision"` // sidecarSet controllerRevision name
 }
 
 // PodMatchSidecarSet determines if pod match Selector of sidecar.
@@ -109,6 +112,11 @@ func GetPodSidecarSetRevision(sidecarSetName string, pod metav1.Object) string {
 	return upgradeSpec.SidecarSetHash
 }
 
+func GetPodSidecarSetControllerRevision(sidecarSetName string, pod metav1.Object) string {
+	upgradeSpec := GetPodSidecarSetUpgradeSpecInAnnotations(sidecarSetName, SidecarSetHashAnnotation, pod)
+	return upgradeSpec.SidecarSetControllerRevision
+}
+
 func GetPodSidecarSetUpgradeSpecInAnnotations(sidecarSetName, annotationKey string, pod metav1.Object) SidecarSetUpgradeSpec {
 	annotations := pod.GetAnnotations()
 	hashKey := annotationKey
@@ -118,7 +126,7 @@ func GetPodSidecarSetUpgradeSpecInAnnotations(sidecarSetName, annotationKey stri
 
 	sidecarSetHash := make(map[string]SidecarSetUpgradeSpec)
 	if err := json.Unmarshal([]byte(annotations[hashKey]), &sidecarSetHash); err != nil {
-		klog.Errorf("parse pod(%s.%s) annotations[%s] value(%s) failed: %s", pod.GetNamespace(), pod.GetName(), hashKey,
+		klog.Errorf("parse pod(%s/%s) annotations[%s] value(%s) failed: %s", pod.GetNamespace(), pod.GetName(), hashKey,
 			annotations[hashKey], err.Error())
 		// to be compatible with older sidecarSet hash struct, map[string]string
 		olderSidecarSetHash := make(map[string]string)
@@ -149,7 +157,7 @@ func updatePodSidecarSetHash(pod *corev1.Pod, sidecarSet *appsv1alpha1.SidecarSe
 	hashKey := SidecarSetHashAnnotation
 	sidecarSetHash := make(map[string]SidecarSetUpgradeSpec)
 	if err := json.Unmarshal([]byte(pod.Annotations[hashKey]), &sidecarSetHash); err != nil {
-		klog.Errorf("unmarshal pod(%s.%s) annotations[%s] failed: %s", pod.Namespace, pod.Name, hashKey, err.Error())
+		klog.Errorf("unmarshal pod(%s/%s) annotations[%s] failed: %s", pod.Namespace, pod.Name, hashKey, err.Error())
 
 		// to be compatible with older sidecarSet hash struct, map[string]string
 		olderSidecarSetHash := make(map[string]string)
@@ -183,10 +191,11 @@ func updatePodSidecarSetHash(pod *corev1.Pod, sidecarSet *appsv1alpha1.SidecarSe
 	}
 
 	sidecarSetHash[sidecarSet.Name] = SidecarSetUpgradeSpec{
-		UpdateTimestamp: metav1.Now(),
-		SidecarSetHash:  GetSidecarSetRevision(sidecarSet),
-		SidecarSetName:  sidecarSet.Name,
-		SidecarList:     sidecarList.List(),
+		UpdateTimestamp:              metav1.Now(),
+		SidecarSetHash:               GetSidecarSetRevision(sidecarSet),
+		SidecarSetName:               sidecarSet.Name,
+		SidecarList:                  sidecarList.List(),
+		SidecarSetControllerRevision: sidecarSet.Status.LatestRevision,
 	}
 	newHash, _ := json.Marshal(sidecarSetHash)
 	pod.Annotations[hashKey] = string(newHash)
@@ -211,6 +220,35 @@ func GetPodsSortFunc(pods []*corev1.Pod, waitUpdateIndexes []int) func(i, j int)
 	return func(i, j int) bool {
 		return kubecontroller.ActivePods(pods).Less(waitUpdateIndexes[i], waitUpdateIndexes[j])
 	}
+}
+
+func IsPodInjectedSidecarSet(pod *corev1.Pod, sidecarSet *appsv1alpha1.SidecarSet) bool {
+	sidecarSetNameStr, ok := pod.Annotations[SidecarSetListAnnotation]
+	if !ok || len(sidecarSetNameStr) == 0 {
+		return false
+	}
+	sidecarSetNames := sets.NewString(strings.Split(sidecarSetNameStr, ",")...)
+	return sidecarSetNames.Has(sidecarSet.Name)
+}
+
+func IsPodConsistentWithSidecarSet(pod *corev1.Pod, sidecarSet *appsv1alpha1.SidecarSet) bool {
+	for i := range sidecarSet.Spec.Containers {
+		container := &sidecarSet.Spec.Containers[i]
+		switch container.UpgradeStrategy.UpgradeType {
+		case appsv1alpha1.SidecarContainerHotUpgrade:
+			_, exist := GetPodHotUpgradeInfoInAnnotations(pod)[container.Name]
+			if !exist || util.GetContainer(fmt.Sprintf("%v-1", container.Name), pod) == nil ||
+				util.GetContainer(fmt.Sprintf("%v-2", container.Name), pod) == nil {
+				return false
+			}
+		default:
+			if util.GetContainer(container.Name, pod) == nil {
+				return false
+			}
+		}
+
+	}
+	return true
 }
 
 func IsInjectedSidecarContainerInPod(container *corev1.Container) bool {
@@ -251,7 +289,7 @@ func GetInjectedVolumeMountsAndEnvs(control SidecarControl, sidecarContainer *ap
 				// get envVar in container
 				eVar := util.GetContainerEnvVar(&appContainer, envName)
 				if eVar == nil {
-					klog.Warningf("pod(%s.%s) container(%s) get env(%s) is nil", pod.Namespace, pod.Name, appContainer.Name, envName)
+					klog.Warningf("pod(%s/%s) container(%s) get env(%s) is nil", pod.Namespace, pod.Name, appContainer.Name, envName)
 					continue
 				}
 				injectedEnvs = append(injectedEnvs, *eVar)
@@ -286,7 +324,7 @@ func GetSidecarTransferEnvs(sidecarContainer *appsv1alpha1.SidecarContainer, pod
 		if tEnv.SourceContainerNameFrom != nil && tEnv.SourceContainerNameFrom.FieldRef != nil {
 			containerName, err := ExtractContainerNameFromFieldPath(tEnv.SourceContainerNameFrom.FieldRef, pod)
 			if err != nil {
-				klog.Errorf("unmarshal pod(%s.%s) annotations[%s] failed: %s", pod.Namespace, pod.Name, err.Error())
+				klog.Errorf("get containerName from pod(%s/%s) annotations or labels[%s] failed: %s", pod.Namespace, pod.Name, tEnv.SourceContainerNameFrom.FieldRef, err.Error())
 				continue
 			}
 			sourceContainerName = containerName

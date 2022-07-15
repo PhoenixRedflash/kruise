@@ -29,7 +29,7 @@ import (
 	synccontrol "github.com/openkruise/kruise/pkg/controller/cloneset/sync"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
@@ -44,6 +44,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
@@ -86,7 +87,6 @@ func Add(mgr manager.Manager) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	_ = fieldindex.RegisterFieldIndexes(mgr.GetCache())
 	recorder := mgr.GetEventRecorderFor("cloneset-controller")
 	if cli := kruiseclient.GetGenericClientWithName("cloneset-controller"); cli != nil {
 		eventBroadcaster := record.NewBroadcaster()
@@ -94,7 +94,7 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
 		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
 	}
-	cli := util.NewClientFromManager(mgr, "cloneset-controller")
+	cli := utilclient.NewClientFromManager(mgr, "cloneset-controller")
 	reconciler := &ReconcileCloneSet{
 		Client:            cli,
 		scheme:            mgr.GetScheme(),
@@ -190,6 +190,8 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		} else {
 			klog.Errorf("Failed syncing CloneSet %s: %v", request, retErr)
 		}
+		// clean the duration store
+		_ = clonesetutils.DurationStore.Pop(request.String())
 	}()
 
 	// Fetch the CloneSet instance
@@ -201,7 +203,6 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 			// For additional cleanup logic use finalizers.
 			klog.V(3).Infof("CloneSet %s has been deleted.", request)
 			clonesetutils.ScaleExpectations.DeleteExpectations(request.String())
-			clonesetutils.UpdateExpectations.DeleteExpectations(request.String())
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -255,20 +256,6 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 		return reconcile.Result{}, err
 	}
 
-	// Refresh update expectations
-	for _, pod := range filteredPods {
-		clonesetutils.UpdateExpectations.ObserveUpdated(request.String(), updateRevision.Name, pod)
-	}
-	// If update expectations have not satisfied yet, just skip this reconcile.
-	if updateSatisfied, unsatisfiedDuration, updateDirtyPods := clonesetutils.UpdateExpectations.SatisfiedExpectations(request.String(), updateRevision.Name); !updateSatisfied {
-		if unsatisfiedDuration >= expectations.ExpectationTimeout {
-			klog.Warningf("Expectation unsatisfied overtime for %v, updateDirtyPods=%v, timeout=%v", request.String(), updateDirtyPods, unsatisfiedDuration)
-			return reconcile.Result{}, nil
-		}
-		klog.V(4).Infof("Not satisfied update for %v, updateDirtyPods=%v", request.String(), updateDirtyPods)
-		return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
-	}
-
 	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
 	clonesetutils.ResourceVersionExpectations.Observe(updateRevision)
 	if isSatisfied, unsatisfiedDuration := clonesetutils.ResourceVersionExpectations.IsSatisfied(updateRevision); !isSatisfied {
@@ -302,9 +289,24 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 
 	if !isPreDownloadDisabled {
 		if currentRevision.Name != updateRevision.Name {
-			// pre-download images for new revision
-			if err := r.createImagePullJobsForInPlaceUpdate(instance, currentRevision, updateRevision); err != nil {
-				klog.Errorf("Failed to create ImagePullJobs for %s: %v", request, err)
+			// get clone pre-download annotation
+			minUpdatedReadyPodsCount := 0
+			if minUpdatedReadyPods, ok := instance.Annotations[appsv1alpha1.ImagePreDownloadMinUpdatedReadyPods]; ok {
+				minUpdatedReadyPodsIntStr := intstrutil.Parse(minUpdatedReadyPods)
+				minUpdatedReadyPodsCount, err = intstrutil.GetScaledValueFromIntOrPercent(&minUpdatedReadyPodsIntStr, int(*instance.Spec.Replicas), true)
+				if err != nil {
+					klog.Errorf("Failed to GetScaledValueFromIntOrPercent of minUpdatedReadyPods for %s: %v", request, err)
+				}
+			}
+			updatedReadyReplicas := instance.Status.UpdatedReadyReplicas
+			if updateRevision.Name != instance.Status.UpdateRevision {
+				updatedReadyReplicas = 0
+			}
+			if int32(minUpdatedReadyPodsCount) <= updatedReadyReplicas {
+				// pre-download images for new revision
+				if err := r.createImagePullJobsForInPlaceUpdate(instance, currentRevision, updateRevision); err != nil {
+					klog.Errorf("Failed to create ImagePullJobs for %s: %v", request, err)
+				}
 			}
 		} else {
 			// delete ImagePullJobs if revisions have been consistent
@@ -315,7 +317,7 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	// scale and update pods
-	delayDuration, syncErr := r.syncCloneSet(instance, &newStatus, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
+	syncErr := r.syncCloneSet(instance, &newStatus, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
 
 	// update new status
 	if err = r.statusUpdater.UpdateCloneSetStatus(instance, &newStatus, filteredPods); err != nil {
@@ -331,32 +333,28 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	if syncErr == nil && instance.Spec.MinReadySeconds > 0 && newStatus.AvailableReplicas != newStatus.ReadyReplicas {
-		minReadyDuration := time.Second * time.Duration(instance.Spec.MinReadySeconds)
-		if delayDuration == 0 || minReadyDuration < delayDuration {
-			delayDuration = minReadyDuration
-		}
+		clonesetutils.DurationStore.Push(request.String(), time.Second*time.Duration(instance.Spec.MinReadySeconds))
 	}
-	return reconcile.Result{RequeueAfter: delayDuration}, syncErr
+	return reconcile.Result{RequeueAfter: clonesetutils.DurationStore.Pop(request.String())}, syncErr
 }
 
 func (r *ReconcileCloneSet) syncCloneSet(
 	instance *appsv1alpha1.CloneSet, newStatus *appsv1alpha1.CloneSetStatus,
 	currentRevision, updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
 	filteredPods []*v1.Pod, filteredPVCs []*v1.PersistentVolumeClaim,
-) (time.Duration, error) {
-	var delayDuration time.Duration
+) error {
 	if instance.DeletionTimestamp != nil {
-		return delayDuration, nil
+		return nil
 	}
 
 	// get the current and update revisions of the set.
 	currentSet, err := r.revisionControl.ApplyRevision(instance, currentRevision)
 	if err != nil {
-		return delayDuration, err
+		return err
 	}
 	updateSet, err := r.revisionControl.ApplyRevision(instance, updateRevision)
 	if err != nil {
-		return delayDuration, err
+		return err
 	}
 
 	var scaling bool
@@ -374,10 +372,10 @@ func (r *ReconcileCloneSet) syncCloneSet(
 		err = podsScaleErr
 	}
 	if scaling {
-		return delayDuration, podsScaleErr
+		return podsScaleErr
 	}
 
-	delayDuration, podsUpdateErr = r.syncControl.Update(updateSet, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
+	podsUpdateErr = r.syncControl.Update(updateSet, currentRevision, updateRevision, revisions, filteredPods, filteredPVCs)
 	if podsUpdateErr != nil {
 		newStatus.Conditions = append(newStatus.Conditions, appsv1alpha1.CloneSetCondition{
 			Type:               appsv1alpha1.CloneSetConditionFailedUpdate,
@@ -385,13 +383,12 @@ func (r *ReconcileCloneSet) syncCloneSet(
 			LastTransitionTime: metav1.Now(),
 			Message:            podsUpdateErr.Error(),
 		})
-		// If these is a delay duration, need not to return error to outside
-		if err == nil && delayDuration <= 0 {
+		if err == nil {
 			err = podsUpdateErr
 		}
 	}
 
-	return delayDuration, err
+	return err
 }
 
 func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisions []*apps.ControllerRevision) (
@@ -439,6 +436,7 @@ func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisi
 	for i := range revisions {
 		if revisions[i].Name == cs.Status.CurrentRevision {
 			currentRevision = revisions[i]
+			break
 		}
 	}
 
@@ -462,7 +460,7 @@ func (r *ReconcileCloneSet) getOwnedResource(cs *appsv1alpha1.CloneSet) ([]*v1.P
 	}
 
 	pvcList := v1.PersistentVolumeClaimList{}
-	if err := r.List(context.TODO(), &pvcList, opts); err != nil {
+	if err := r.List(context.TODO(), &pvcList, opts, utilclient.DisableDeepCopy); err != nil {
 		return nil, nil, err
 	}
 	var filteredPVCs []*v1.PersistentVolumeClaim

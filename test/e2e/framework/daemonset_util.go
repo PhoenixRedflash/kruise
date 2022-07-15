@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"fmt"
+
 	"reflect"
 	"strings"
 	"time"
@@ -17,10 +18,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	daemonutil "k8s.io/kubernetes/pkg/controller/daemon/util"
+	utilpointer "k8s.io/utils/pointer"
 )
 
 const (
@@ -32,9 +36,6 @@ const (
 	DaemonSetLabelPrefix = "daemonset-"
 	DaemonSetNameLabel   = DaemonSetLabelPrefix + "name"
 	DaemonSetColorLabel  = DaemonSetLabelPrefix + "color"
-
-	OldImage = "busybox:1.29"
-	NewImage = "busybox:1.30"
 )
 
 type DaemonSetTester struct {
@@ -75,8 +76,9 @@ func (t *DaemonSetTester) NewDaemonSet(name string, label map[string]string, ima
 							Command: []string{"/bin/sh", "-c", "sleep 10000000"},
 						},
 					},
-					HostNetwork: true,
-					Tolerations: []v1.Toleration{{Operator: v1.TolerationOpExists}},
+					HostNetwork:                   true,
+					Tolerations:                   []v1.Toleration{{Operator: v1.TolerationOpExists}},
+					TerminationGracePeriodSeconds: utilpointer.Int64(3),
 				},
 			},
 			UpdateStrategy: updateStrategy,
@@ -108,7 +110,7 @@ func (t *DaemonSetTester) UpdateDaemonSet(name string, fn func(ds *appsv1alpha1.
 func (t *DaemonSetTester) DeleteDaemonSet(namespace, name string) {
 	err := t.kc.AppsV1alpha1().DaemonSets(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
-		Logf("delete daemonset(%s.%s) failed: %s", t.ns, name, err.Error())
+		Logf("delete daemonset(%s/%s) failed: %s", t.ns, name, err.Error())
 		return
 	}
 }
@@ -240,6 +242,8 @@ func (t *DaemonSetTester) GetNewPodsToCheckImage(label map[string]string, newIma
 			for _, status := range pod.Status.ContainerStatuses {
 				substr := strings.Split(status.Image, "/")
 				image := substr[len(substr)-1]
+				substr = strings.Split(newImage, "/")
+				newImage = substr[len(substr)-1]
 				if image != newImage {
 					Logf("container image of new pod %s is %s, should be %s", pod.Name, image, newImage)
 					return false, nil
@@ -397,4 +401,42 @@ func (t *DaemonSetTester) CheckPodHasNotRecreate(oldPods, newPods []v1.Pod) bool
 	}
 
 	return true
+}
+
+func (t *DaemonSetTester) GetPod(name string) (*v1.Pod, error) {
+	return t.c.CoreV1().Pods(t.ns).Get(context.TODO(), name, metav1.GetOptions{})
+}
+
+func (t *DaemonSetTester) PatchPod(name string, patchType types.PatchType, patch []byte) (*v1.Pod, error) {
+	return t.c.CoreV1().Pods(t.ns).Patch(context.TODO(), name, patchType, patch, metav1.PatchOptions{})
+}
+
+func (t *DaemonSetTester) SortPodNames(podList *v1.PodList) []string {
+	names := sets.NewString()
+	if podList == nil {
+		return names.List()
+	}
+	for i := range podList.Items {
+		names.Insert(podList.Items[i].Name)
+	}
+	return names.List()
+}
+
+func (t *DaemonSetTester) GetNodesToDaemonPods(label map[string]string) (map[string][]*v1.Pod, error) {
+	podList, err := t.ListDaemonPods(label)
+	if err != nil {
+		return nil, err
+	}
+	// Group Pods by Node name.
+	nodeToDaemonPods := make(map[string][]*v1.Pod)
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		nodeName, err := daemonutil.GetTargetNodeName(pod)
+		if err != nil {
+			continue
+		}
+		nodeToDaemonPods[nodeName] = append(nodeToDaemonPods[nodeName], pod)
+	}
+
+	return nodeToDaemonPods, nil
 }

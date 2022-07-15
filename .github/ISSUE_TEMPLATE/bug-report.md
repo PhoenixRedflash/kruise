@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: Create a report to help us improve
-title: "[BUG]"
+title: "[BUG] YOUR_TITLE"
 labels: kind/bug
 assignees: FillZpp
 
@@ -20,7 +20,5 @@ assignees: FillZpp
 **Environment**:
 - Kruise version:
 - Kubernetes version (use `kubectl version`):
-- OS (e.g: `cat /etc/os-release`):
-- Kernel (e.g. `uname -a`):
-- Install tools:
+- Install details (e.g. helm install args):
 - Others:

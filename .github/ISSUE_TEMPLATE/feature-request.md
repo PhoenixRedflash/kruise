@@ -1,9 +1,9 @@
 ---
 name: Feature Request
 about: Suggest an idea for this project
-title: "[feature request]"
+title: "[feature request] YOUR_TITLE"
 labels: kind/feature-request
-assignees: jian-he
+assignees: FillZpp
 
 ---
 

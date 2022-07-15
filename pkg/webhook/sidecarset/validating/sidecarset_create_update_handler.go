@@ -27,6 +27,7 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/util"
+	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
@@ -230,7 +231,7 @@ func validateContainersForSidecarSet(
 		},
 	}
 
-	allErrs = append(allErrs, corevalidation.ValidatePodCreate(fakePod, corevalidation.PodValidationOptions{AllowMultipleHugePageResources: true, AllowDownwardAPIHugePages: true})...)
+	allErrs = append(allErrs, corevalidation.ValidatePodCreate(fakePod, webhookutil.DefaultPodValidationOptions)...)
 
 	return allErrs
 }
@@ -248,6 +249,9 @@ func validateSidecarContainerConflict(newContainers, oldContainers []appsv1alpha
 				allErrs = append(allErrs, field.Invalid(fldPath.Child("upgradeStrategy").Child("upgradeType"),
 					container.Name, fmt.Sprintf("container %v upgradeType is immutable", container.Name)))
 			}
+		} else {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("name"),
+				container.Name, fmt.Sprintf("container %v is not found", container.Name)))
 		}
 	}
 
@@ -265,8 +269,14 @@ func validateSidecarConflict(sidecarSets *appsv1alpha1.SidecarSetList, sidecarSe
 	volumeInOthers := make(map[string]*appsv1alpha1.SidecarSet)
 	// init container name -> sidecarset
 	initContainerInOthers := make(map[string]*appsv1alpha1.SidecarSet)
+	matchedList := make([]*appsv1alpha1.SidecarSet, 0)
 	for i := range sidecarSets.Items {
-		set := &sidecarSets.Items[i]
+		obj := &sidecarSets.Items[i]
+		if !isSidecarSetNamespaceDiff(sidecarSet, obj) && util.IsSelectorOverlapping(sidecarSet.Spec.Selector, obj.Spec.Selector) {
+			matchedList = append(matchedList, obj)
+		}
+	}
+	for _, set := range matchedList {
 		//ignore this sidecarset
 		if set.Name == sidecarSet.Name {
 			continue
@@ -285,46 +295,25 @@ func validateSidecarConflict(sidecarSets *appsv1alpha1.SidecarSetList, sidecarSe
 	// whether initContainers conflict
 	for _, container := range sidecarSet.Spec.InitContainers {
 		if other, ok := initContainerInOthers[container.Name]; ok {
-			//if the two sidecarset scope namespace is different, continue
-			if isSidecarSetNamespaceDiff(sidecarSet, other) {
-				continue
-			}
-			// if the two sidecarset will selector same pod, then judge conflict
-			if util.IsSelectorOverlapping(sidecarSet.Spec.Selector, other.Spec.Selector) {
-				allErrs = append(allErrs, field.Invalid(fldPath.Child("containers"), container.Name, fmt.Sprintf(
-					"container %v already exist in %v", container.Name, other.Name)))
-			}
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("containers"), container.Name, fmt.Sprintf(
+				"container %v already exist in %v", container.Name, other.Name)))
 		}
 	}
 
 	// whether containers conflict
 	for _, container := range sidecarSet.Spec.Containers {
 		if other, ok := containerInOthers[container.Name]; ok {
-			// if the two sidecarset scope namespace is different, continue
-			if isSidecarSetNamespaceDiff(sidecarSet, other) {
-				continue
-			}
-			// if the two sidecarset will selector same pod, then judge conflict
-			if util.IsSelectorOverlapping(sidecarSet.Spec.Selector, other.Spec.Selector) {
-				allErrs = append(allErrs, field.Invalid(fldPath.Child("containers"), container.Name, fmt.Sprintf(
-					"container %v already exist in %v", container.Name, other.Name)))
-			}
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("containers"), container.Name, fmt.Sprintf(
+				"container %v already exist in %v", container.Name, other.Name)))
 		}
 	}
 
 	// whether volumes conflict
 	for _, volume := range sidecarSet.Spec.Volumes {
 		if other, ok := volumeInOthers[volume.Name]; ok {
-			//if the two sidecarset scope namespace is different, continue
-			if isSidecarSetNamespaceDiff(sidecarSet, other) {
-				continue
-			}
-			// if the two sidecarset will selector same pod, then judge conflict
-			if util.IsSelectorOverlapping(sidecarSet.Spec.Selector, other.Spec.Selector) {
-				if !reflect.DeepEqual(&volume, getSidecarsetVolume(volume.Name, other)) {
-					allErrs = append(allErrs, field.Invalid(fldPath.Child("volumes"), volume.Name, fmt.Sprintf(
-						"volume %s is in conflict with sidecarset %s", volume.Name, other.Name)))
-				}
+			if !reflect.DeepEqual(&volume, getSidecarsetVolume(volume.Name, other)) {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("volumes"), volume.Name, fmt.Sprintf(
+					"volume %s is in conflict with sidecarset %s", volume.Name, other.Name)))
 			}
 		}
 	}

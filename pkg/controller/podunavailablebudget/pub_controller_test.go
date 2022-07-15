@@ -24,6 +24,7 @@ import (
 	"time"
 
 	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
+	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	"github.com/openkruise/kruise/pkg/util"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	apps "k8s.io/api/apps/v1"
@@ -766,10 +767,12 @@ func TestPubReconcile(t *testing.T) {
 					t.Fatalf("create pod failed: %s", err.Error())
 				}
 			}
+			controllerfinder.Finder = &controllerfinder.ControllerFinder{Client: fakeClient}
 			reconciler := ReconcilePodUnavailableBudget{
 				Client:           fakeClient,
 				recorder:         record.NewFakeRecorder(10),
-				controllerFinder: controllerfinder.NewControllerFinder(fakeClient),
+				controllerFinder: &controllerfinder.ControllerFinder{Client: fakeClient},
+				pubControl:       pubcontrol.NewPubControl(fakeClient),
 			}
 
 			_, err := reconciler.syncPodUnavailableBudget(pub)

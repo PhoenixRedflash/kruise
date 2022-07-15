@@ -76,8 +76,12 @@ func calculateDiffsWithExpectation(cs *appsv1alpha1.CloneSet, pods []*v1.Pod, cu
 	replicas := int(*cs.Spec.Replicas)
 	var partition, maxSurge, maxUnavailable, scaleMaxUnavailable int
 	if cs.Spec.UpdateStrategy.Partition != nil {
-		partition, _ = intstrutil.GetValueFromIntOrPercent(cs.Spec.UpdateStrategy.Partition, replicas, true)
-		partition = integer.IntMin(partition, replicas)
+		if pValue, err := util.CalculatePartitionReplicas(cs.Spec.UpdateStrategy.Partition, cs.Spec.Replicas); err != nil {
+			// TODO: maybe, we should block pod update if partition settings is wrong
+			klog.Errorf("CloneSet %s/%s partition value is illegal", cs.Namespace, cs.Name)
+		} else {
+			partition = pValue
+		}
 	}
 	if cs.Spec.UpdateStrategy.MaxSurge != nil {
 		maxSurge, _ = intstrutil.GetValueFromIntOrPercent(cs.Spec.UpdateStrategy.MaxSurge, replicas, true)
@@ -118,7 +122,7 @@ func calculateDiffsWithExpectation(cs *appsv1alpha1.CloneSet, pods []*v1.Pod, cu
 
 				if isSpecifiedDelete(cs, p) {
 					toDeleteNewRevisionCount++
-				} else if !isPodAvailable(coreControl, p, cs.Spec.MinReadySeconds) {
+				} else if !IsPodAvailable(coreControl, p, cs.Spec.MinReadySeconds) {
 					unavailableNewRevisionCount++
 				}
 			}
@@ -134,7 +138,7 @@ func calculateDiffsWithExpectation(cs *appsv1alpha1.CloneSet, pods []*v1.Pod, cu
 
 				if isSpecifiedDelete(cs, p) {
 					toDeleteOldRevisionCount++
-				} else if !isPodAvailable(coreControl, p, cs.Spec.MinReadySeconds) {
+				} else if !IsPodAvailable(coreControl, p, cs.Spec.MinReadySeconds) {
 					unavailableOldRevisionCount++
 				}
 			}
@@ -231,10 +235,10 @@ func isSpecifiedDelete(cs *appsv1alpha1.CloneSet, pod *v1.Pod) bool {
 }
 
 func isPodReady(coreControl clonesetcore.Control, pod *v1.Pod) bool {
-	return isPodAvailable(coreControl, pod, 0)
+	return IsPodAvailable(coreControl, pod, 0)
 }
 
-func isPodAvailable(coreControl clonesetcore.Control, pod *v1.Pod, minReadySeconds int32) bool {
+func IsPodAvailable(coreControl clonesetcore.Control, pod *v1.Pod, minReadySeconds int32) bool {
 	state := lifecycle.GetPodLifecycleState(pod)
 	if state != "" && state != appspub.LifecycleStateNormal {
 		return false

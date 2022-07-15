@@ -28,7 +28,7 @@ import (
 
 // SetDefaults_SidecarSet set default values for SidecarSet.
 func SetDefaultsSidecarSet(obj *v1alpha1.SidecarSet) {
-	setSidecarSetUpdateStratety(&obj.Spec.UpdateStrategy)
+	setSidecarSetUpdateStrategy(&obj.Spec.UpdateStrategy)
 
 	for i := range obj.Spec.InitContainers {
 		setSidecarDefaultContainer(&obj.Spec.InitContainers[i])
@@ -40,6 +40,15 @@ func SetDefaultsSidecarSet(obj *v1alpha1.SidecarSet) {
 
 	//default setting volumes
 	SetDefaultPodVolumes(obj.Spec.Volumes)
+
+	//default setting history revision limitation
+	SetDefaultRevisionHistoryLimit(&obj.Spec.RevisionHistoryLimit)
+}
+
+func SetDefaultRevisionHistoryLimit(revisionHistoryLimit **int32) {
+	if *revisionHistoryLimit == nil {
+		*revisionHistoryLimit = utilpointer.Int32Ptr(10)
+	}
 }
 
 func setDefaultSidecarContainer(sidecarContainer *v1alpha1.SidecarContainer) {
@@ -56,7 +65,7 @@ func setDefaultSidecarContainer(sidecarContainer *v1alpha1.SidecarContainer) {
 	setSidecarDefaultContainer(sidecarContainer)
 }
 
-func setSidecarSetUpdateStratety(strategy *v1alpha1.SidecarSetUpdateStrategy) {
+func setSidecarSetUpdateStrategy(strategy *v1alpha1.SidecarSetUpdateStrategy) {
 	if strategy.Type == "" {
 		strategy.Type = v1alpha1.RollingUpdateSidecarSetStrategyType
 	}
@@ -251,33 +260,34 @@ func SetDefaultsDaemonSet(obj *v1alpha1.DaemonSet) {
 
 	if obj.Spec.UpdateStrategy.Type == "" {
 		obj.Spec.UpdateStrategy.Type = v1alpha1.RollingUpdateDaemonSetStrategyType
-
-		// UpdateStrategy.RollingUpdate will take default values below.
-		obj.Spec.UpdateStrategy.RollingUpdate = &v1alpha1.RollingUpdateDaemonSet{}
 	}
-
 	if obj.Spec.UpdateStrategy.Type == v1alpha1.RollingUpdateDaemonSetStrategyType {
 		if obj.Spec.UpdateStrategy.RollingUpdate == nil {
 			obj.Spec.UpdateStrategy.RollingUpdate = &v1alpha1.RollingUpdateDaemonSet{}
 		}
-		if obj.Spec.UpdateStrategy.RollingUpdate.Partition == nil {
-			obj.Spec.UpdateStrategy.RollingUpdate.Partition = new(int32)
-			*obj.Spec.UpdateStrategy.RollingUpdate.Partition = 0
-		}
-		if obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil {
-			maxUnavailable := intstr.FromInt(1)
-			obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+
+		// Make it compatible with the predicated Surging
+		if obj.Spec.UpdateStrategy.RollingUpdate.Type == v1alpha1.DeprecatedSurgingRollingUpdateType {
+			if obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil {
+				maxSurge := intstr.FromInt(1)
+				obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge = &maxSurge
+			}
+			if obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil {
+				maxUnavailable := intstr.FromInt(0)
+				obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+			}
 		}
 
-		if obj.Spec.UpdateStrategy.RollingUpdate.Type == "" {
+		// Default and convert to Standard
+		if obj.Spec.UpdateStrategy.RollingUpdate.Type == "" || obj.Spec.UpdateStrategy.RollingUpdate.Type == v1alpha1.DeprecatedSurgingRollingUpdateType {
 			obj.Spec.UpdateStrategy.RollingUpdate.Type = v1alpha1.StandardRollingUpdateType
 		}
-		// Only when RollingUpdate Type is SurgingRollingUpdateType, it need to initialize the MaxSurge.
-		if obj.Spec.UpdateStrategy.RollingUpdate.Type == v1alpha1.SurgingRollingUpdateType {
-			if obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil {
-				MaxSurge := intstr.FromInt(1)
-				obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge = &MaxSurge
-			}
+
+		if obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable == nil && obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge == nil {
+			maxUnavailable := intstr.FromInt(1)
+			obj.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+			MaxSurge := intstr.FromInt(0)
+			obj.Spec.UpdateStrategy.RollingUpdate.MaxSurge = &MaxSurge
 		}
 	}
 

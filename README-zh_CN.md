@@ -77,7 +77,8 @@ OpenKruise (官网: [https://openkruise.io](https://openkruise.io)) 是托管在
 - 小红书, 比心, 永辉科技中心, 跟谁学, 哈啰出行
 - Spectro Cloud, 艾佳生活, Arkane Systems, 滴普科技, 火花思维
 - OPPO, 苏宁, 欢聚时代, 汇量科技, 深圳凤凰木网络有限公司
-- 小米, 网易
+- 小米, 网易, 美团金融, 虾皮购物, e签宝
+- LinkedIn, 雪球, 兴盛优选, Wholee
 
 ## 贡献
 
@@ -89,6 +90,7 @@ OpenKruise (官网: [https://openkruise.io](https://openkruise.io)) 是托管在
 
 - Slack: [OpenKruise channel](https://kubernetes.slack.com/channels/openkruise) (*English*)
 - 钉钉：搜索群ID `23330762` (*Chinese*)
+- 微信：添加用户 `openkruise` 并让机器人拉你入群 (*Chinese*)
 - 社区双周会 (APAC, *Chinese*):
   - 周四 19:00 GMT+8 (Asia/Shanghai)
   - [进入会议(zoom)](https://us02web.zoom.us/j/87059136652?pwd=NlI4UThFWXVRZkxIU0dtR1NINncrQT09)

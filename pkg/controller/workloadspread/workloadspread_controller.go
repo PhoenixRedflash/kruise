@@ -45,6 +45,7 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
@@ -149,12 +150,12 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	cli := util.NewClientFromManager(mgr, controllerName)
+	cli := utilclient.NewClientFromManager(mgr, controllerName)
 	return &ReconcileWorkloadSpread{
 		Client:           cli,
 		scheme:           mgr.GetScheme(),
 		recorder:         mgr.GetEventRecorderFor(controllerName),
-		controllerFinder: controllerfinder.NewControllerFinder(mgr.GetClient()),
+		controllerFinder: controllerfinder.Finder,
 	}
 }
 
@@ -264,7 +265,7 @@ func (r *ReconcileWorkloadSpread) getPodsForWorkloadSpread(ws *appsv1alpha1.Work
 
 	switch targetRef.Kind {
 	case controllerKindDep.Kind, controllerKindRS.Kind, controllerKruiseKindCS.Kind:
-		pods, workloadReplicas, err = r.controllerFinder.GetPodsForRef(targetRef.APIVersion, targetRef.Kind, targetRef.Name, ws.Namespace, false)
+		pods, workloadReplicas, err = r.controllerFinder.GetPodsForRef(targetRef.APIVersion, targetRef.Kind, ws.Namespace, targetRef.Name, false)
 	case controllerKindJob.Kind:
 		pods, workloadReplicas, err = r.getPodJob(targetRef, ws.Namespace)
 	default:

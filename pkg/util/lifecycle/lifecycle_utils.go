@@ -22,44 +22,78 @@ import (
 	"time"
 
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	"github.com/openkruise/kruise/pkg/util/podadapter"
+	"github.com/openkruise/kruise/pkg/util/podreadiness"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-
-	"github.com/openkruise/kruise/pkg/util/podadapter"
 )
+
+const (
+	// these keys for MarkPodNotReady Policy of pod lifecycle
+	preparingDeleteHookKey = "preDeleteHook"
+	preparingUpdateHookKey = "preUpdateHook"
+)
+
+func newPodReadinessControl(adp podadapter.Adapter) podreadiness.Interface {
+	return podreadiness.NewForAdapter(adp)
+}
 
 // Interface for managing pods lifecycle.
 type Interface interface {
-	UpdatePodLifecycle(pod *v1.Pod, state appspub.LifecycleStateType) (bool, error)
-	UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.LifecycleStateType, inPlaceUpdateHandler *appspub.LifecycleHook) (bool, error)
+	UpdatePodLifecycle(pod *v1.Pod, state appspub.LifecycleStateType, markPodNotReady bool) (bool, *v1.Pod, error)
+	UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.LifecycleStateType, inPlaceUpdateHandler *appspub.LifecycleHook) (bool, *v1.Pod, error)
 }
 
 type realControl struct {
-	adp podadapter.Adapter
+	adp                 podadapter.Adapter
+	podReadinessControl podreadiness.Interface
 }
 
 func New(c client.Client) Interface {
-	return &realControl{adp: &podadapter.AdapterRuntimeClient{Client: c}}
+	adp := &podadapter.AdapterRuntimeClient{Client: c}
+	return &realControl{
+		adp:                 adp,
+		podReadinessControl: newPodReadinessControl(adp),
+	}
 }
 
 func NewForTypedClient(c clientset.Interface) Interface {
-	return &realControl{adp: &podadapter.AdapterTypedClient{Client: c}}
+	adp := &podadapter.AdapterTypedClient{Client: c}
+	return &realControl{
+		adp:                 adp,
+		podReadinessControl: newPodReadinessControl(adp),
+	}
 }
 
 func NewForInformer(informer coreinformers.PodInformer) Interface {
-	return &realControl{adp: &podadapter.AdapterInformer{PodInformer: informer}}
-}
-
-func NewForTest(c client.Client) Interface {
-	return &realControl{adp: &podadapter.AdapterRuntimeClient{Client: c}}
+	adp := &podadapter.AdapterInformer{PodInformer: informer}
+	return &realControl{
+		adp:                 adp,
+		podReadinessControl: newPodReadinessControl(adp),
+	}
 }
 
 func GetPodLifecycleState(pod *v1.Pod) appspub.LifecycleStateType {
 	return appspub.LifecycleStateType(pod.Labels[appspub.LifecycleStateKey])
+}
+
+func IsHookMarkPodNotReady(lifecycleHook *appspub.LifecycleHook) bool {
+	if lifecycleHook == nil {
+		return false
+	}
+	return lifecycleHook.MarkPodNotReady
+}
+
+func IsLifecycleMarkPodNotReady(lifecycle *appspub.Lifecycle) bool {
+	if lifecycle == nil {
+		return false
+	}
+	return IsHookMarkPodNotReady(lifecycle.PreDelete) || IsHookMarkPodNotReady(lifecycle.InPlaceUpdate)
 }
 
 func SetPodLifecycle(state appspub.LifecycleStateType) func(*v1.Pod) {
@@ -75,12 +109,35 @@ func SetPodLifecycle(state appspub.LifecycleStateType) func(*v1.Pod) {
 	}
 }
 
-func (c *realControl) UpdatePodLifecycle(pod *v1.Pod, state appspub.LifecycleStateType) (bool, error) {
-	if GetPodLifecycleState(pod) == state {
-		return false, nil
+func (c *realControl) executePodNotReadyPolicy(pod *v1.Pod, state appspub.LifecycleStateType) (err error) {
+	switch state {
+	case appspub.LifecycleStatePreparingDelete:
+		err = c.podReadinessControl.AddNotReadyKey(pod, getReadinessMessage(preparingDeleteHookKey))
+	case appspub.LifecycleStatePreparingUpdate:
+		err = c.podReadinessControl.AddNotReadyKey(pod, getReadinessMessage(preparingUpdateHookKey))
+	case appspub.LifecycleStateUpdated:
+		err = c.podReadinessControl.RemoveNotReadyKey(pod, getReadinessMessage(preparingUpdateHookKey))
 	}
 
-	var err error
+	if err != nil {
+		klog.Errorf("Failed to set pod(%v) Ready/NotReady at %s lifecycle state, error: %v",
+			client.ObjectKeyFromObject(pod), state, err)
+	}
+	return
+}
+
+func (c *realControl) UpdatePodLifecycle(pod *v1.Pod, state appspub.LifecycleStateType, markPodNotReady bool) (updated bool, gotPod *v1.Pod, err error) {
+	if markPodNotReady {
+		if err = c.executePodNotReadyPolicy(pod, state); err != nil {
+			return false, nil, err
+		}
+	}
+
+	if GetPodLifecycleState(pod) == state {
+		return false, pod, nil
+	}
+
+	pod = pod.DeepCopy()
 	if adp, ok := c.adp.(podadapter.AdapterWithPatch); ok {
 		body := fmt.Sprintf(
 			`{"metadata":{"labels":{"%s":"%s"},"annotations":{"%s":"%s"}}}`,
@@ -89,25 +146,31 @@ func (c *realControl) UpdatePodLifecycle(pod *v1.Pod, state appspub.LifecycleSta
 			appspub.LifecycleTimestampKey,
 			time.Now().Format(time.RFC3339),
 		)
-		err = adp.PatchPod(pod, client.RawPatch(types.StrategicMergePatchType, []byte(body)))
+		gotPod, err = adp.PatchPod(pod, client.RawPatch(types.StrategicMergePatchType, []byte(body)))
 	} else {
 		SetPodLifecycle(state)(pod)
-		err = c.adp.UpdatePod(pod)
+		gotPod, err = c.adp.UpdatePod(pod)
 	}
 
-	return true, err
+	return true, gotPod, err
 }
 
-func (c *realControl) UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.LifecycleStateType, inPlaceUpdateHandler *appspub.LifecycleHook) (bool, error) {
+func (c *realControl) UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.LifecycleStateType, inPlaceUpdateHandler *appspub.LifecycleHook) (updated bool, gotPod *v1.Pod, err error) {
 	if inPlaceUpdateHandler == nil || pod == nil {
-		return false, nil
+		return false, pod, nil
+	}
+
+	if inPlaceUpdateHandler.MarkPodNotReady {
+		if err = c.executePodNotReadyPolicy(pod, state); err != nil {
+			return false, nil, err
+		}
 	}
 
 	if GetPodLifecycleState(pod) == state {
-		return false, nil
+		return false, pod, nil
 	}
 
-	var err error
+	pod = pod.DeepCopy()
 	if adp, ok := c.adp.(podadapter.AdapterWithPatch); ok {
 		var labelsHandler, finalizersHandler string
 		for k, v := range inPlaceUpdateHandler.LabelsHandler {
@@ -127,7 +190,7 @@ func (c *realControl) UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.L
 			time.Now().Format(time.RFC3339),
 			finalizersHandler,
 		)
-		err = adp.PatchPod(pod, client.RawPatch(types.StrategicMergePatchType, []byte(body)))
+		gotPod, err = adp.PatchPod(pod, client.RawPatch(types.StrategicMergePatchType, []byte(body)))
 	} else {
 		if pod.Labels == nil {
 			pod.Labels = make(map[string]string)
@@ -138,10 +201,10 @@ func (c *realControl) UpdatePodLifecycleWithHandler(pod *v1.Pod, state appspub.L
 		pod.Finalizers = append(pod.Finalizers, inPlaceUpdateHandler.FinalizersHandler...)
 
 		SetPodLifecycle(state)(pod)
-		err = c.adp.UpdatePod(pod)
+		gotPod, err = c.adp.UpdatePod(pod)
 	}
 
-	return true, err
+	return true, gotPod, err
 }
 
 func IsPodHooked(hook *appspub.LifecycleHook, pod *v1.Pod) bool {
@@ -176,4 +239,8 @@ func IsPodAllHooked(hook *appspub.LifecycleHook, pod *v1.Pod) bool {
 		}
 	}
 	return true
+}
+
+func getReadinessMessage(key string) podreadiness.Message {
+	return podreadiness.Message{UserAgent: "Lifecycle", Key: key}
 }

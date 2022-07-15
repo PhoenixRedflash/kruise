@@ -24,11 +24,13 @@ import (
 	"time"
 
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	"github.com/openkruise/kruise/pkg/util"
 	"github.com/openkruise/kruise/pkg/util/podadapter"
 	"github.com/openkruise/kruise/pkg/util/revisionadapter"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/clock"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -37,7 +39,10 @@ import (
 )
 
 var (
-	inPlaceUpdatePatchRexp = regexp.MustCompile("^/spec/containers/([0-9]+)/image$")
+	containerImagePatchRexp = regexp.MustCompile("^/spec/containers/([0-9]+)/image$")
+	rfc6901Decoder          = strings.NewReplacer("~1", "/", "~0", "~")
+
+	Clock clock.Clock = clock.RealClock{}
 )
 
 type RefreshResult struct {
@@ -46,37 +51,39 @@ type RefreshResult struct {
 }
 
 type UpdateResult struct {
-	InPlaceUpdate bool
-	UpdateErr     error
-	DelayDuration time.Duration
+	InPlaceUpdate      bool
+	UpdateErr          error
+	DelayDuration      time.Duration
+	NewResourceVersion string
 }
 
 type UpdateOptions struct {
 	GracePeriodSeconds int32
 	AdditionalFuncs    []func(*v1.Pod)
 
-	CalculateSpec        func(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) *UpdateSpec
-	PatchSpecToPod       func(pod *v1.Pod, spec *UpdateSpec) (*v1.Pod, error)
-	CheckUpdateCompleted func(pod *v1.Pod) error
-	GetRevision          func(rev *apps.ControllerRevision) string
+	CalculateSpec                  func(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) *UpdateSpec
+	PatchSpecToPod                 func(pod *v1.Pod, spec *UpdateSpec, state *appspub.InPlaceUpdateState) (*v1.Pod, error)
+	CheckPodUpdateCompleted        func(pod *v1.Pod) error
+	CheckContainersUpdateCompleted func(pod *v1.Pod, state *appspub.InPlaceUpdateState) error
+	GetRevision                    func(rev *apps.ControllerRevision) string
 }
 
 // Interface for managing pods in-place update.
 type Interface interface {
-	Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult
 	CanUpdateInPlace(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) bool
 	Update(pod *v1.Pod, oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) UpdateResult
+	Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult
 }
 
 // UpdateSpec records the images of containers which need to in-place update.
 type UpdateSpec struct {
-	Revision    string            `json:"revision"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	Revision string `json:"revision"`
 
-	ContainerImages       map[string]string `json:"containerImages,omitempty"`
-	MetaDataPatch         []byte            `json:"metaDataPatch,omitempty"`
-	UpdateEnvFromMetadata bool              `json:"updateEnvFromMetadata,omitempty"`
-	GraceSeconds          int32             `json:"graceSeconds,omitempty"`
+	ContainerImages       map[string]string            `json:"containerImages,omitempty"`
+	ContainerRefMetadata  map[string]metav1.ObjectMeta `json:"containerRefMetadata,omitempty"`
+	MetaDataPatch         []byte                       `json:"metaDataPatch,omitempty"`
+	UpdateEnvFromMetadata bool                         `json:"updateEnvFromMetadata,omitempty"`
+	GraceSeconds          int32                        `json:"graceSeconds,omitempty"`
 
 	OldTemplate *v1.PodTemplateSpec `json:"oldTemplate,omitempty"`
 	NewTemplate *v1.PodTemplateSpec `json:"newTemplate,omitempty"`
@@ -85,68 +92,73 @@ type UpdateSpec struct {
 type realControl struct {
 	podAdapter      podadapter.Adapter
 	revisionAdapter revisionadapter.Interface
-
-	// just for test
-	now func() metav1.Time
 }
 
 func New(c client.Client, revisionAdapter revisionadapter.Interface) Interface {
-	return &realControl{podAdapter: &podadapter.AdapterRuntimeClient{Client: c}, revisionAdapter: revisionAdapter, now: metav1.Now}
+	return &realControl{podAdapter: &podadapter.AdapterRuntimeClient{Client: c}, revisionAdapter: revisionAdapter}
 }
 
 func NewForTypedClient(c clientset.Interface, revisionAdapter revisionadapter.Interface) Interface {
-	return &realControl{podAdapter: &podadapter.AdapterTypedClient{Client: c}, revisionAdapter: revisionAdapter, now: metav1.Now}
+	return &realControl{podAdapter: &podadapter.AdapterTypedClient{Client: c}, revisionAdapter: revisionAdapter}
 }
 
 func NewForInformer(informer coreinformers.PodInformer, revisionAdapter revisionadapter.Interface) Interface {
-	return &realControl{podAdapter: &podadapter.AdapterInformer{PodInformer: informer}, revisionAdapter: revisionAdapter, now: metav1.Now}
-}
-
-func NewForTest(c client.Client, revisionAdapter revisionadapter.Interface, now func() metav1.Time) Interface {
-	return &realControl{podAdapter: &podadapter.AdapterRuntimeClient{Client: c}, revisionAdapter: revisionAdapter, now: now}
+	return &realControl{podAdapter: &podadapter.AdapterInformer{PodInformer: informer}, revisionAdapter: revisionAdapter}
 }
 
 func (c *realControl) Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult {
 	opts = SetOptionsDefaults(opts)
 
-	if err := c.refreshCondition(pod, opts); err != nil {
-		return RefreshResult{RefreshErr: err}
+	// check if it is in grace period
+	if gracePeriod, _ := appspub.GetInPlaceUpdateGrace(pod); gracePeriod != "" {
+		delayDuration, err := c.finishGracePeriod(pod, opts)
+		if err != nil {
+			return RefreshResult{RefreshErr: err}
+		}
+		return RefreshResult{DelayDuration: delayDuration}
 	}
 
-	var delayDuration time.Duration
-	var err error
-	if gracePeriod, _ := appspub.GetInPlaceUpdateGrace(pod); gracePeriod != "" {
-		if delayDuration, err = c.finishGracePeriod(pod, opts); err != nil {
+	if stateStr, ok := appspub.GetInPlaceUpdateState(pod); ok {
+		state := appspub.InPlaceUpdateState{}
+		if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
 			return RefreshResult{RefreshErr: err}
+		}
+
+		// check in-place updating has not completed yet
+		if checkErr := opts.CheckContainersUpdateCompleted(pod, &state); checkErr != nil {
+			klog.V(6).Infof("Check Pod %s/%s in-place update not completed yet: %v", pod.Namespace, pod.Name, checkErr)
+			return RefreshResult{}
+		}
+
+		// check if there are containers with lower-priority that have to in-place update in next batch
+		if len(state.NextContainerImages) > 0 || len(state.NextContainerRefMetadata) > 0 {
+
+			// pre-check the previous updated containers
+			if checkErr := doPreCheckBeforeNext(pod, state.PreCheckBeforeNext); checkErr != nil {
+				klog.V(5).Infof("Pod %s/%s in-place update pre-check not passed: %v", pod.Namespace, pod.Name, checkErr)
+				return RefreshResult{}
+			}
+
+			// do update the next containers
+			if updated, err := c.updateNextBatch(pod, opts); err != nil {
+				return RefreshResult{RefreshErr: err}
+			} else if updated {
+				return RefreshResult{}
+			}
 		}
 	}
 
-	return RefreshResult{DelayDuration: delayDuration}
-}
-
-func (c *realControl) refreshCondition(pod *v1.Pod, opts *UpdateOptions) error {
-	// no need to update condition because of no readiness-gate
 	if !containsReadinessGate(pod) {
-		return nil
-	}
-
-	// in-place updating has not completed yet
-	if checkErr := opts.CheckUpdateCompleted(pod); checkErr != nil {
-		klog.V(6).Infof("Check Pod %s/%s in-place update not completed yet: %v", pod.Namespace, pod.Name, checkErr)
-		return nil
-	}
-
-	// already ready
-	if existingCondition := GetCondition(pod); existingCondition != nil && existingCondition.Status == v1.ConditionTrue {
-		return nil
+		return RefreshResult{}
 	}
 
 	newCondition := v1.PodCondition{
 		Type:               appspub.InPlaceUpdateReady,
 		Status:             v1.ConditionTrue,
-		LastTransitionTime: c.now(),
+		LastTransitionTime: metav1.NewTime(Clock.Now()),
 	}
-	return c.updateCondition(pod, newCondition)
+	err := c.updateCondition(pod, newCondition)
+	return RefreshResult{RefreshErr: err}
 }
 
 func (c *realControl) updateCondition(pod *v1.Pod, condition v1.PodCondition) error {
@@ -156,10 +168,10 @@ func (c *realControl) updateCondition(pod *v1.Pod, condition v1.PodCondition) er
 			return err
 		}
 
-		setPodCondition(clone, condition)
+		util.SetPodCondition(clone, condition)
 		// We only update the ready condition to False, and let Kubelet update it to True
 		if condition.Status == v1.ConditionFalse {
-			updatePodReadyCondition(clone)
+			util.SetPodReadyCondition(clone)
 		}
 		return c.podAdapter.UpdatePodStatus(clone)
 	})
@@ -201,16 +213,53 @@ func (c *realControl) finishGracePeriod(pod *v1.Pod, opts *UpdateOptions) (time.
 				return nil
 			}
 
-			if clone, err = opts.PatchSpecToPod(clone, &spec); err != nil {
+			if clone, err = opts.PatchSpecToPod(clone, &spec, &updateState); err != nil {
 				return err
 			}
 			appspub.RemoveInPlaceUpdateGrace(clone)
 		}
 
-		return c.podAdapter.UpdatePod(clone)
+		_, err = c.podAdapter.UpdatePod(clone)
+		return err
 	})
 
 	return delayDuration, err
+}
+
+func (c *realControl) updateNextBatch(pod *v1.Pod, opts *UpdateOptions) (bool, error) {
+	var updated bool
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		updated = false
+		clone, err := c.podAdapter.GetPod(pod.Namespace, pod.Name)
+		if err != nil {
+			return err
+		}
+
+		state := appspub.InPlaceUpdateState{}
+		if stateStr, ok := appspub.GetInPlaceUpdateState(pod); !ok {
+			return nil
+		} else if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
+			return err
+		}
+
+		if len(state.NextContainerImages) == 0 && len(state.NextContainerRefMetadata) == 0 {
+			return nil
+		}
+
+		spec := UpdateSpec{
+			ContainerImages:       state.NextContainerImages,
+			ContainerRefMetadata:  state.NextContainerRefMetadata,
+			UpdateEnvFromMetadata: state.UpdateEnvFromMetadata,
+		}
+		if clone, err = opts.PatchSpecToPod(clone, &spec, &state); err != nil {
+			return err
+		}
+
+		updated = true
+		_, err = c.podAdapter.UpdatePod(clone)
+		return err
+	})
+	return updated, err
 }
 
 func (c *realControl) CanUpdateInPlace(oldRevision, newRevision *apps.ControllerRevision, opts *UpdateOptions) bool {
@@ -233,7 +282,7 @@ func (c *realControl) Update(pod *v1.Pod, oldRevision, newRevision *apps.Control
 	if containsReadinessGate(pod) {
 		newCondition := v1.PodCondition{
 			Type:               appspub.InPlaceUpdateReady,
-			LastTransitionTime: c.now(),
+			LastTransitionTime: metav1.NewTime(Clock.Now()),
 			Status:             v1.ConditionFalse,
 			Reason:             "StartInPlaceUpdate",
 		}
@@ -243,7 +292,8 @@ func (c *realControl) Update(pod *v1.Pod, oldRevision, newRevision *apps.Control
 	}
 
 	// 3. update container images
-	if err := c.updatePodInPlace(pod, spec, opts); err != nil {
+	newResourceVersion, err := c.updatePodInPlace(pod, spec, opts)
+	if err != nil {
 		return UpdateResult{InPlaceUpdate: true, UpdateErr: err}
 	}
 
@@ -251,11 +301,12 @@ func (c *realControl) Update(pod *v1.Pod, oldRevision, newRevision *apps.Control
 	if opts.GracePeriodSeconds > 0 {
 		delayDuration = time.Second * time.Duration(opts.GracePeriodSeconds)
 	}
-	return UpdateResult{InPlaceUpdate: true, DelayDuration: delayDuration}
+	return UpdateResult{InPlaceUpdate: true, DelayDuration: delayDuration, NewResourceVersion: newResourceVersion}
 }
 
-func (c *realControl) updatePodInPlace(pod *v1.Pod, spec *UpdateSpec, opts *UpdateOptions) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+func (c *realControl) updatePodInPlace(pod *v1.Pod, spec *UpdateSpec, opts *UpdateOptions) (string, error) {
+	var newResourceVersion string
+	retryErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		clone, err := c.podAdapter.GetPod(pod.Namespace, pod.Name)
 		if err != nil {
 			return err
@@ -270,26 +321,17 @@ func (c *realControl) updatePodInPlace(pod *v1.Pod, spec *UpdateSpec, opts *Upda
 			f(clone)
 		}
 
-		// record old containerStatuses
 		inPlaceUpdateState := appspub.InPlaceUpdateState{
 			Revision:              spec.Revision,
-			UpdateTimestamp:       c.now(),
-			LastContainerStatuses: make(map[string]appspub.InPlaceUpdateContainerStatus, len(spec.ContainerImages)),
+			UpdateTimestamp:       metav1.NewTime(Clock.Now()),
 			UpdateEnvFromMetadata: spec.UpdateEnvFromMetadata,
-		}
-		for _, c := range clone.Status.ContainerStatuses {
-			if _, ok := spec.ContainerImages[c.Name]; ok {
-				inPlaceUpdateState.LastContainerStatuses[c.Name] = appspub.InPlaceUpdateContainerStatus{
-					ImageID: c.ImageID,
-				}
-			}
 		}
 		inPlaceUpdateStateJSON, _ := json.Marshal(inPlaceUpdateState)
 		clone.Annotations[appspub.InPlaceUpdateStateKey] = string(inPlaceUpdateStateJSON)
 		delete(clone.Annotations, appspub.InPlaceUpdateStateKeyOld)
 
 		if spec.GraceSeconds <= 0 {
-			if clone, err = opts.PatchSpecToPod(clone, spec); err != nil {
+			if clone, err = opts.PatchSpecToPod(clone, spec, &inPlaceUpdateState); err != nil {
 				return err
 			}
 			appspub.RemoveInPlaceUpdateGrace(clone)
@@ -298,8 +340,13 @@ func (c *realControl) updatePodInPlace(pod *v1.Pod, spec *UpdateSpec, opts *Upda
 			clone.Annotations[appspub.InPlaceUpdateGraceKey] = string(inPlaceUpdateSpecJSON)
 		}
 
-		return c.podAdapter.UpdatePod(clone)
+		newPod, updateErr := c.podAdapter.UpdatePod(clone)
+		if updateErr == nil {
+			newResourceVersion = newPod.ResourceVersion
+		}
+		return updateErr
 	})
+	return newResourceVersion, retryErr
 }
 
 // GetTemplateFromRevision returns the pod template parsed from ControllerRevision.
@@ -336,68 +383,7 @@ func containsReadinessGate(pod *v1.Pod) bool {
 
 // GetCondition returns the InPlaceUpdateReady condition in Pod.
 func GetCondition(pod *v1.Pod) *v1.PodCondition {
-	return getCondition(pod, appspub.InPlaceUpdateReady)
-}
-
-func getCondition(pod *v1.Pod, cType v1.PodConditionType) *v1.PodCondition {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == cType {
-			return &c
-		}
-	}
-	return nil
-}
-
-func setPodCondition(pod *v1.Pod, condition v1.PodCondition) {
-	for i, c := range pod.Status.Conditions {
-		if c.Type == condition.Type {
-			if c.Status != condition.Status {
-				pod.Status.Conditions[i] = condition
-			}
-			return
-		}
-	}
-	pod.Status.Conditions = append(pod.Status.Conditions, condition)
-}
-
-func updatePodReadyCondition(pod *v1.Pod) {
-	podReady := getCondition(pod, v1.PodReady)
-	if podReady == nil {
-		return
-	}
-
-	containersReady := getCondition(pod, v1.ContainersReady)
-	if containersReady == nil || containersReady.Status != v1.ConditionTrue {
-		return
-	}
-
-	var unreadyMessages []string
-	for _, rg := range pod.Spec.ReadinessGates {
-		c := getCondition(pod, rg.ConditionType)
-		if c == nil {
-			unreadyMessages = append(unreadyMessages, fmt.Sprintf("corresponding condition of pod readiness gate %q does not exist.", string(rg.ConditionType)))
-		} else if c.Status != v1.ConditionTrue {
-			unreadyMessages = append(unreadyMessages, fmt.Sprintf("the status of pod readiness gate %q is not \"True\", but %v", string(rg.ConditionType), c.Status))
-		}
-	}
-
-	newPodReady := v1.PodCondition{
-		Type:               v1.PodReady,
-		Status:             v1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-	}
-	// Set "Ready" condition to "False" if any readiness gate is not ready.
-	if len(unreadyMessages) != 0 {
-		unreadyMessage := strings.Join(unreadyMessages, ", ")
-		newPodReady = v1.PodCondition{
-			Type:    v1.PodReady,
-			Status:  v1.ConditionFalse,
-			Reason:  "ReadinessGatesNotReady",
-			Message: unreadyMessage,
-		}
-	}
-
-	setPodCondition(pod, newPodReady)
+	return util.GetCondition(pod, appspub.InPlaceUpdateReady)
 }
 
 func roundupSeconds(d time.Duration) time.Duration {
@@ -405,4 +391,20 @@ func roundupSeconds(d time.Duration) time.Duration {
 		return d
 	}
 	return (d/time.Second + 1) * time.Second
+}
+
+func doPreCheckBeforeNext(pod *v1.Pod, preCheck *appspub.InPlaceUpdatePreCheckBeforeNext) error {
+	if preCheck == nil {
+		return nil
+	}
+	for _, cName := range preCheck.ContainersRequiredReady {
+		cStatus := util.GetContainerStatus(cName, pod)
+		if cStatus == nil {
+			return fmt.Errorf("not found container %s in pod status", cName)
+		}
+		if !cStatus.Ready {
+			return fmt.Errorf("waiting container %s to be ready", cName)
+		}
+	}
+	return nil
 }

@@ -17,9 +17,8 @@ limitations under the License.
 package sync
 
 import (
-	"time"
-
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
@@ -41,7 +40,7 @@ type Interface interface {
 	Update(cs *appsv1alpha1.CloneSet,
 		currentRevision, updateRevision *apps.ControllerRevision, revisions []*apps.ControllerRevision,
 		pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim,
-	) (time.Duration, error)
+	) error
 }
 
 type realControl struct {
@@ -50,6 +49,7 @@ type realControl struct {
 	inplaceControl   inplaceupdate.Interface
 	recorder         record.EventRecorder
 	controllerFinder *controllerfinder.ControllerFinder
+	pubControl       pubcontrol.PubControl
 }
 
 func New(c client.Client, recorder record.EventRecorder) Interface {
@@ -58,6 +58,7 @@ func New(c client.Client, recorder record.EventRecorder) Interface {
 		inplaceControl:   inplaceupdate.New(c, clonesetutils.RevisionAdapterImpl),
 		lifecycleControl: lifecycle.New(c),
 		recorder:         recorder,
-		controllerFinder: controllerfinder.NewControllerFinder(c),
+		controllerFinder: controllerfinder.Finder,
+		pubControl:       pubcontrol.NewPubControl(c),
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	"github.com/spf13/pflag"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +39,7 @@ import (
 
 	extclient "github.com/openkruise/kruise/pkg/client"
 	"github.com/openkruise/kruise/pkg/features"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	"github.com/openkruise/kruise/pkg/webhook"
@@ -46,6 +48,7 @@ import (
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
 	"github.com/openkruise/kruise/pkg/controller"
+	_ "github.com/openkruise/kruise/pkg/util/metrics/leadership"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -141,9 +144,15 @@ func main() {
 		LeaderElectionResourceLock: resourcelock.ConfigMapsResourceLock,
 		Namespace:                  namespace,
 		SyncPeriod:                 syncPeriod,
+		NewCache:                   utilclient.NewCache,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+	err = controllerfinder.InitControllerFinder(mgr)
+	if err != nil {
+		setupLog.Error(err, "unable to start ControllerFinder")
 		os.Exit(1)
 	}
 

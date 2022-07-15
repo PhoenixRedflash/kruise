@@ -121,6 +121,24 @@ var (
 					"app": "suxing-test",
 				},
 			},
+			InitContainers: []appsv1alpha1.SidecarContainer{
+				{
+					Container: corev1.Container{
+						Name:  "dns-e",
+						Image: "dns-e-image:1.0",
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "volume-1"},
+						},
+					},
+					PodInjectPolicy: appsv1alpha1.BeforeAppContainerType,
+					TransferEnv: []appsv1alpha1.TransferEnvVar{
+						{
+							SourceContainerName: "nginx",
+							EnvName:             "hello2",
+						},
+					},
+				},
+			},
 			Containers: []appsv1alpha1.SidecarContainer{
 				{
 					Container: corev1.Container{
@@ -375,7 +393,7 @@ func testPodHasNoMatchedSidecarSet(t *testing.T, sidecarSetIn *appsv1alpha1.Side
 	client := fake.NewClientBuilder().WithObjects(sidecarSetIn).Build()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	_ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, _ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 
 	if len(podOut.Spec.Containers) != len(podIn.Spec.Containers) {
 		t.Fatalf("expect %v containers but got %v", len(podIn.Spec.Containers), len(podOut.Spec.Containers))
@@ -417,7 +435,7 @@ func doMergeSidecarSecretsTest(t *testing.T, sidecarSetIn *appsv1alpha1.SidecarS
 	client := fake.NewClientBuilder().WithObjects(sidecarSetIn).Build()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	_ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, _ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 
 	if len(podOut.Spec.ImagePullSecrets) != len(podIn.Spec.ImagePullSecrets)+len(sidecarSetIn.Spec.ImagePullSecrets)-repeat {
 		t.Fatalf("expect %v secrets but got %v", len(podIn.Spec.ImagePullSecrets)+len(sidecarSetIn.Spec.ImagePullSecrets)-repeat, len(podOut.Spec.ImagePullSecrets))
@@ -438,7 +456,7 @@ func testInjectionStrategyPaused(t *testing.T, sidecarIn *appsv1alpha1.SidecarSe
 	client := fake.NewClientBuilder().WithObjects(sidecarPaused).Build()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	_ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, _ = podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 
 	if len(podOut.Spec.Containers) != len(podIn.Spec.Containers) {
 		t.Fatalf("expect %v containers but got %v", len(podIn.Spec.Containers), len(podOut.Spec.Containers))
@@ -457,7 +475,7 @@ func testSidecarSetPodInjectPolicy(t *testing.T, sidecarSetIn *appsv1alpha1.Side
 	podOut := podIn.DeepCopy()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 	if err != nil {
 		t.Fatalf("inject sidecar into pod failed, err: %v", err)
 	}
@@ -534,7 +552,7 @@ func testSidecarVolumesAppend(t *testing.T, sidecarSetIn *appsv1alpha1.SidecarSe
 	podOut := podIn.DeepCopy()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 	if err != nil {
 		t.Fatalf("inject sidecar into pod failed, err: %v", err)
 	}
@@ -682,7 +700,7 @@ func testPodVolumeMountsAppend(t *testing.T, sidecarSetIn *appsv1alpha1.SidecarS
 			podOut := podIn.DeepCopy()
 			podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 			req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-			err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+			_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 			if err != nil {
 				t.Fatalf("inject sidecar into pod failed, err: %v", err)
 			}
@@ -714,11 +732,16 @@ func testSidecarSetTransferEnv(t *testing.T, sidecarSetIn *appsv1alpha1.SidecarS
 	podOut := podIn.DeepCopy()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 	if err != nil {
 		t.Fatalf("inject sidecar into pod failed, err: %v", err)
 	}
-
+	if len(podOut.Spec.InitContainers[1].Env) != 2 {
+		t.Fatalf("expect 2 envs but got %v", len(podOut.Spec.InitContainers[0].Env))
+	}
+	if podOut.Spec.InitContainers[1].Env[1].Value != "world2" {
+		t.Fatalf("expect env with value 'world2' but got %v", podOut.Spec.Containers[0].Env[1].Value)
+	}
 	if len(podOut.Spec.Containers[0].Env) != 2 {
 		t.Fatalf("expect 2 envs but got %v", len(podOut.Spec.Containers[0].Env))
 	}
@@ -743,7 +766,7 @@ func testSidecarSetHashInject(t *testing.T, sidecarSetIn1 *appsv1alpha1.SidecarS
 	podOut := podIn.DeepCopy()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 	if err != nil {
 		t.Fatalf("inject sidecar into pod failed, err: %v", err)
 	}
@@ -774,7 +797,7 @@ func testSidecarSetNameInject(t *testing.T, sidecarSetIn1, sidecarSetIn3 *appsv1
 	podOut := podIn.DeepCopy()
 	podHandler := &PodCreateHandler{Decoder: decoder, Client: client}
 	req := newAdmission(admissionv1.Create, runtime.RawExtension{}, runtime.RawExtension{}, "")
-	err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
+	_, err := podHandler.sidecarsetMutatingPod(context.Background(), req, podOut)
 	if err != nil {
 		t.Fatalf("inject sidecar into pod failed, err: %v", err)
 	}

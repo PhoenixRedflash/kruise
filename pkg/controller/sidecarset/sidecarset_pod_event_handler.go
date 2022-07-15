@@ -56,7 +56,7 @@ func (p *enqueueRequestForPod) addPod(q workqueue.RateLimitingInterface, obj run
 	}
 
 	for _, sidecarSet := range sidecarSets {
-		klog.V(3).Infof("Create pod(%s.%s) and reconcile sidecarSet(%s)", pod.Namespace, pod.Name, sidecarSet.Name)
+		klog.V(3).Infof("Create pod(%s/%s) and reconcile sidecarSet(%s)", pod.Namespace, pod.Name, sidecarSet.Name)
 		q.Add(reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name: sidecarSet.Name,
@@ -115,7 +115,9 @@ func (p *enqueueRequestForPod) getPodMatchedSidecarSets(pod *corev1.Pod) ([]*app
 				}
 				return nil, err
 			}
-			matchedSidecarSets = append(matchedSidecarSets, sidecarSet)
+			if sidecarcontrol.IsPodConsistentWithSidecarSet(pod, sidecarSet) {
+				matchedSidecarSets = append(matchedSidecarSets, sidecarSet)
+			}
 		}
 		return matchedSidecarSets, nil
 	}

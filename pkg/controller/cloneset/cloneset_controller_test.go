@@ -29,6 +29,7 @@ import (
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	"golang.org/x/net/context"
@@ -89,8 +90,9 @@ func TestReconcile(t *testing.T) {
 	// Setup the Manager and Controller.  Wrap the Controller Reconcile function so it writes each request to a
 	// channel when it is finished.
 	mgr, err := manager.New(cfg, manager.Options{MetricsBindAddress: "0"})
+	_ = fieldindex.RegisterFieldIndexes(mgr.GetCache())
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	c = util.NewClientFromManager(mgr, "test-cloneset-controller")
+	c = utilclient.NewClientFromManager(mgr, "test-cloneset-controller")
 
 	//recFn, requests := SetupTestReconcile(newReconciler(mgr))
 	g.Expect(add(mgr, newReconciler(mgr))).NotTo(gomega.HaveOccurred())

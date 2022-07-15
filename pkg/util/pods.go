@@ -17,6 +17,7 @@ limitations under the License.
 package util
 
 import (
+	"fmt"
 	"strings"
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
@@ -200,11 +201,11 @@ func GetPodVolume(pod *v1.Pod, volumeName string) *v1.Volume {
 }
 
 func IsRunningAndReady(pod *v1.Pod) bool {
-	return pod.Status.Phase == v1.PodRunning && podutil.IsPodReady(pod)
+	return pod.Status.Phase == v1.PodRunning && podutil.IsPodReady(pod) && pod.DeletionTimestamp.IsZero()
 }
 
-func IsPodContainerDigestEqual(containers sets.String, pod *v1.Pod) bool {
-	cStatus := make(map[string]string, len(pod.Status.ContainerStatuses))
+func GetPodContainerImageIDs(pod *v1.Pod) map[string]string {
+	cImageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
 	for i := range pod.Status.ContainerStatuses {
 		c := &pod.Status.ContainerStatuses[i]
 		//ImageID format: docker-pullable://busybox@sha256:a9286defaba7b3a519d585ba0e37d0b2cbee74ebfe590960b0b1d6a5e97d1e1d
@@ -212,8 +213,13 @@ func IsPodContainerDigestEqual(containers sets.String, pod *v1.Pod) bool {
 		if strings.Contains(imageID, "://") {
 			imageID = strings.Split(imageID, "://")[1]
 		}
-		cStatus[c.Name] = imageID
+		cImageIDs[c.Name] = imageID
 	}
+	return cImageIDs
+}
+
+func IsPodContainerDigestEqual(containers sets.String, pod *v1.Pod) bool {
+	cImageIDs := GetPodContainerImageIDs(pod)
 
 	for _, container := range pod.Spec.Containers {
 		if !containers.Has(container.Name) {
@@ -223,7 +229,7 @@ func IsPodContainerDigestEqual(containers sets.String, pod *v1.Pod) bool {
 		if !IsImageDigest(container.Image) {
 			return false
 		}
-		imageID, ok := cStatus[container.Name]
+		imageID, ok := cImageIDs[container.Name]
 		if !ok {
 			return false
 		}
@@ -266,4 +272,74 @@ func InjectReadinessGateToPod(pod *v1.Pod, conditionType v1.PodConditionType) {
 		}
 	}
 	pod.Spec.ReadinessGates = append(pod.Spec.ReadinessGates, v1.PodReadinessGate{ConditionType: conditionType})
+}
+
+func ContainsObjectRef(slice []v1.ObjectReference, obj v1.ObjectReference) bool {
+	for _, o := range slice {
+		if o.UID == obj.UID {
+			return true
+		}
+	}
+	return false
+}
+
+func GetCondition(pod *v1.Pod, cType v1.PodConditionType) *v1.PodCondition {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == cType {
+			return &c
+		}
+	}
+	return nil
+}
+
+func SetPodCondition(pod *v1.Pod, condition v1.PodCondition) {
+	for i, c := range pod.Status.Conditions {
+		if c.Type == condition.Type {
+			if c.Status != condition.Status {
+				pod.Status.Conditions[i] = condition
+			}
+			return
+		}
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, condition)
+}
+
+func SetPodReadyCondition(pod *v1.Pod) {
+	podReady := GetCondition(pod, v1.PodReady)
+	if podReady == nil {
+		return
+	}
+
+	containersReady := GetCondition(pod, v1.ContainersReady)
+	if containersReady == nil || containersReady.Status != v1.ConditionTrue {
+		return
+	}
+
+	var unreadyMessages []string
+	for _, rg := range pod.Spec.ReadinessGates {
+		c := GetCondition(pod, rg.ConditionType)
+		if c == nil {
+			unreadyMessages = append(unreadyMessages, fmt.Sprintf("corresponding condition of pod readiness gate %q does not exist.", string(rg.ConditionType)))
+		} else if c.Status != v1.ConditionTrue {
+			unreadyMessages = append(unreadyMessages, fmt.Sprintf("the status of pod readiness gate %q is not \"True\", but %v", string(rg.ConditionType), c.Status))
+		}
+	}
+
+	newPodReady := v1.PodCondition{
+		Type:               v1.PodReady,
+		Status:             v1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+	}
+	// Set "Ready" condition to "False" if any readiness gate is not ready.
+	if len(unreadyMessages) != 0 {
+		unreadyMessage := strings.Join(unreadyMessages, ", ")
+		newPodReady = v1.PodCondition{
+			Type:    v1.PodReady,
+			Status:  v1.ConditionFalse,
+			Reason:  "ReadinessGatesNotReady",
+			Message: unreadyMessage,
+		}
+	}
+
+	SetPodCondition(pod, newPodReady)
 }

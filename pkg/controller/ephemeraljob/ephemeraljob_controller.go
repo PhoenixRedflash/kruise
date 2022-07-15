@@ -26,6 +26,7 @@ import (
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/controller/ephemeraljob/econtainer"
 	"github.com/openkruise/kruise/pkg/util"
+	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	v1 "k8s.io/api/core/v1"
@@ -64,7 +65,7 @@ func Add(mgr manager.Manager) error {
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) *ReconcileEphemeralJob {
 	return &ReconcileEphemeralJob{
-		Client: util.NewClientFromManager(mgr, "ephemeraljob-controller"),
+		Client: utilclient.NewClientFromManager(mgr, "ephemeraljob-controller"),
 		scheme: mgr.GetScheme(),
 	}
 }
@@ -102,8 +103,7 @@ type ReconcileEphemeralJob struct {
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=ephemeraljobs,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=ephemeraljobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get
-// +kubebuilder:rbac:groups=core,resources=pods/ephemeralcontainers,verbs=get;update
+// +kubebuilder:rbac:groups=core,resources=pods/ephemeralcontainers,verbs=get;update;patch
 
 // Reconcile reads that state of the cluster for a EphemeralJob object and makes changes based on the state read
 // and what is in the EphemeralJob.Spec
@@ -255,7 +255,7 @@ func (r *ReconcileEphemeralJob) filterPods(job *appsv1alpha1.EphemeralJob) ([]*v
 			continue
 		}
 
-		if len(targetPods) < int(*job.Spec.Replicas) {
+		if job.Spec.Replicas == nil || len(targetPods) < int(*job.Spec.Replicas) {
 			targetPods = append(targetPods, &podList.Items[i])
 		}
 	}
@@ -283,11 +283,16 @@ func (r *ReconcileEphemeralJob) filterInjectedPods(job *appsv1alpha1.EphemeralJo
 	// Ignore inactive pods
 	var targetPods []*v1.Pod
 	for i := range podList.Items {
-		if !kubecontroller.IsPodActive(&podList.Items[i]) {
+		pod := &podList.Items[i]
+		if !kubecontroller.IsPodActive(pod) {
 			continue
 		}
-		if existEphemeralContainer(job, &podList.Items[i]) {
-			targetPods = append(targetPods, &podList.Items[i])
+		if exists, owned := existEphemeralContainer(job, pod); exists {
+			if owned {
+				targetPods = append(targetPods, pod)
+			} else {
+				klog.Warningf("EphemeralJob %s/%s ignores Pod %s for it exists conflict ephemeral containers", job.Namespace, job.Name, pod)
+			}
 		}
 	}
 
@@ -329,7 +334,7 @@ func (r *ReconcileEphemeralJob) syncTargetPods(job *appsv1alpha1.EphemeralJob, t
 	_, err := clonesetutils.DoItSlowly(len(toCreatePods), kubecontroller.SlowStartInitialBatchSize, func() error {
 		pod := <-podsCreationChan
 
-		if existEphemeralContainer(job, pod) {
+		if exists, _ := existEphemeralContainer(job, pod); exists {
 			return nil
 		}
 
@@ -370,20 +375,27 @@ func (r *ReconcileEphemeralJob) calculateStatus(job *appsv1alpha1.EphemeralJob, 
 		return err
 	}
 
+	var replicas int32
+	if job.Spec.Replicas == nil {
+		replicas = job.Status.Matches
+	} else {
+		replicas = *job.Spec.Replicas
+	}
+
 	if job.Status.Matches == 0 {
 		job.Status.Phase = appsv1alpha1.EphemeralJobWaiting
 		job.Status.Conditions = addConditions(job.Status.Conditions, appsv1alpha1.EJobMatchedEmpty, "MatchEmpty", "job match no pods")
-	} else if job.Status.Succeeded == *job.Spec.Replicas && job.Status.Succeeded > 0 {
+	} else if job.Status.Succeeded == replicas && job.Status.Succeeded > 0 {
 		job.Status.CompletionTime = timeNow()
 		job.Status.Phase = appsv1alpha1.EphemeralJobSucceeded
 		job.Status.Conditions = addConditions(job.Status.Conditions, appsv1alpha1.EJobSucceeded, "JobSucceeded", "job success to run all tasks")
 	} else if job.Status.Running > 0 {
 		job.Status.Phase = appsv1alpha1.EphemeralJobRunning
-	} else if job.Status.Failed == *job.Spec.Replicas {
+	} else if job.Status.Failed == replicas {
 		job.Status.CompletionTime = timeNow()
 		job.Status.Phase = appsv1alpha1.EphemeralJobFailed
 		job.Status.Conditions = addConditions(job.Status.Conditions, appsv1alpha1.EJobFailed, "JobFailed", "job failed to run all tasks")
-	} else if job.Status.Waiting == *job.Spec.Replicas {
+	} else if job.Status.Waiting == replicas {
 		job.Status.Phase = appsv1alpha1.EphemeralJobWaiting
 	} else {
 		job.Status.Phase = appsv1alpha1.EphemeralJobUnknown
