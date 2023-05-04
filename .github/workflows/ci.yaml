@@ -21,9 +21,19 @@ env:
   AWS_USR: ${{ secrets.AWS_USR }}
 
 jobs:
+  typos-check:
+    name: Spell Check with Typos
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout Actions Repository
+        uses: actions/checkout@v3
+      - name: Check spelling with custom config file
+        uses: crate-ci/typos@v1.13.10
+        with:
+          config: ./typos.toml
 
   golangci-lint:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -63,7 +73,7 @@ jobs:
           sarif_file: 'trivy-results.sarif'
 
   markdownlint-misspell-shellcheck:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     # this image is build from Dockerfile
     # https://github.com/pouchcontainer/pouchlinter/blob/master/Dockerfile
     container: pouchcontainer/pouchlinter:v0.1.2
@@ -90,7 +100,7 @@ jobs:
 #          bash -c "exit $code";
 
   unit-tests:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
         with:

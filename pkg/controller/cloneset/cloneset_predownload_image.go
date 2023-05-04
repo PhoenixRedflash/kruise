@@ -61,12 +61,12 @@ func (r *ReconcileCloneSet) createImagePullJobsForInPlaceUpdate(cs *appsv1alpha1
 	// ignore if all Pods update in one batch
 	var partition, maxUnavailable int
 	if cs.Spec.UpdateStrategy.Partition != nil {
-		if pValue, err := util.CalculatePartitionReplicas(cs.Spec.UpdateStrategy.Partition, cs.Spec.Replicas); err != nil {
+		pValue, err := util.CalculatePartitionReplicas(cs.Spec.UpdateStrategy.Partition, cs.Spec.Replicas)
+		if err != nil {
 			klog.Errorf("CloneSet %s/%s partition value is illegal", cs.Namespace, cs.Name)
 			return err
-		} else {
-			partition = pValue
 		}
+		partition = pValue
 	}
 	maxUnavailable, _ = intstrutil.GetValueFromIntOrPercent(
 		intstrutil.ValueOrDefault(cs.Spec.UpdateStrategy.MaxUnavailable, intstrutil.FromString(appsv1alpha1.DefaultCloneSetMaxUnavailable)), int(*cs.Spec.Replicas), false)
@@ -108,13 +108,18 @@ func (r *ReconcileCloneSet) createImagePullJobsForInPlaceUpdate(cs *appsv1alpha1
 	}
 	labelMap[history.ControllerRevisionHashLabel] = updateRevision.Labels[history.ControllerRevisionHashLabel]
 
+	annotationMap := make(map[string]string)
+	for k, v := range cs.Spec.Template.Annotations {
+		annotationMap[k] = v
+	}
+
 	containerImages := diffImagesBetweenRevisions(currentRevision, updateRevision)
 	klog.V(3).Infof("CloneSet %s/%s begin to create ImagePullJobs for revision %s -> %s: %v",
 		cs.Namespace, cs.Name, currentRevision.Name, updateRevision.Name, containerImages)
 	for name, image := range containerImages {
 		// job name is revision name + container name, it can not be more than 255 characters
 		jobName := fmt.Sprintf("%s-%s", updateRevision.Name, name)
-		err := imagejobutilfunc.CreateJobForWorkload(r.Client, cs, clonesetutils.ControllerKind, jobName, image, labelMap, *selector, pullSecrets)
+		err := imagejobutilfunc.CreateJobForWorkload(r.Client, cs, clonesetutils.ControllerKind, jobName, image, labelMap, annotationMap, *selector, pullSecrets)
 		if err != nil {
 			if !errors.IsAlreadyExists(err) {
 				klog.Errorf("CloneSet %s/%s failed to create ImagePullJob %s: %v", cs.Namespace, cs.Name, jobName, err)
