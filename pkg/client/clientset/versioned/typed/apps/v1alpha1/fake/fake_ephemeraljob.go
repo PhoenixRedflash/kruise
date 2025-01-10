@@ -23,7 +23,6 @@ import (
 	v1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -35,9 +34,9 @@ type FakeEphemeralJobs struct {
 	ns   string
 }
 
-var ephemeraljobsResource = schema.GroupVersionResource{Group: "apps.kruise.io", Version: "v1alpha1", Resource: "ephemeraljobs"}
+var ephemeraljobsResource = v1alpha1.SchemeGroupVersion.WithResource("ephemeraljobs")
 
-var ephemeraljobsKind = schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "EphemeralJob"}
+var ephemeraljobsKind = v1alpha1.SchemeGroupVersion.WithKind("EphemeralJob")
 
 // Get takes name of the ephemeralJob, and returns the corresponding ephemeralJob object, and an error if there is any.
 func (c *FakeEphemeralJobs) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.EphemeralJob, err error) {
@@ -116,7 +115,7 @@ func (c *FakeEphemeralJobs) UpdateStatus(ctx context.Context, ephemeralJob *v1al
 // Delete takes name of the ephemeralJob and deletes it. Returns an error if one occurs.
 func (c *FakeEphemeralJobs) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(ephemeraljobsResource, c.ns, name), &v1alpha1.EphemeralJob{})
+		Invokes(testing.NewDeleteActionWithOptions(ephemeraljobsResource, c.ns, name, opts), &v1alpha1.EphemeralJob{})
 
 	return err
 }

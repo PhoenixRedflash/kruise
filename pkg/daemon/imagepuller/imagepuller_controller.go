@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/tools/reference"
@@ -56,7 +57,7 @@ type Controller struct {
 }
 
 // NewController returns the controller for image pulling
-func NewController(opts daemonoptions.Options, secretManager daemonutil.SecretManager) (*Controller, error) {
+func NewController(opts daemonoptions.Options, secretManager daemonutil.SecretManager, cfg *rest.Config) (*Controller, error) {
 	genericClient := client.GetGenericClientWithName("kruise-daemon-imagepuller")
 	informer := newNodeImageInformer(genericClient.KruiseClient, opts.NodeName)
 
@@ -85,7 +86,7 @@ func NewController(opts daemonoptions.Options, secretManager daemonutil.SecretMa
 				return
 			}
 			if reflect.DeepEqual(oldNodeImage.Spec, newNodeImage.Spec) {
-				klog.V(5).Infof("Find imagePullNode %s spec has not changed, skip enqueueing.", newNodeImage.Name)
+				klog.V(5).InfoS("Find imagePullNode spec has not changed, skip enqueueing.", "nodeImage", newNodeImage.Name)
 				return
 			}
 			logNewImages(oldNodeImage, newNodeImage)
@@ -155,7 +156,7 @@ func (c *Controller) Run(stop <-chan struct{}) {
 		return
 	}
 
-	klog.Infof("Starting puller controller")
+	klog.Info("Starting puller controller")
 	// Launch one workers to process resources, for there is only one NodeImage per Node
 	go wait.Until(func() {
 		for c.processNextWorkItem() {
@@ -193,7 +194,7 @@ func (c *Controller) processNextWorkItem() bool {
 func (c *Controller) sync(key string) (retErr error) {
 	_, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		klog.Warningf("Invalid key: %s", key)
+		klog.InfoS("Invalid key", "key", key)
 		return nil
 	}
 
@@ -201,16 +202,16 @@ func (c *Controller) sync(key string) (retErr error) {
 	if errors.IsNotFound(err) {
 		return nil
 	} else if err != nil {
-		klog.Errorf("Failed to get NodeImage %s: %v", name, err)
+		klog.ErrorS(err, "Failed to get NodeImage %s: %v", "nodeImage", name)
 		return err
 	}
 
-	klog.V(3).Infof("Start syncing for %s", name)
+	klog.V(3).InfoS("Start syncing", "name", name)
 	defer func() {
 		if retErr != nil {
-			klog.Errorf("Failed to sync for %s: %v", name, retErr)
+			klog.ErrorS(retErr, "Failed to sync", "name", name)
 		} else {
-			klog.V(3).Infof("Finished syncing for %s", name)
+			klog.V(3).InfoS("Finished syncing", "name", name)
 		}
 	}()
 
@@ -228,7 +229,7 @@ func (c *Controller) sync(key string) (retErr error) {
 
 		imageStatus := c.puller.GetStatus(imageName)
 		if klog.V(9).Enabled() {
-			klog.V(9).Infof("get image %v status %#v", imageName, imageStatus)
+			klog.V(9).InfoS("get image status", "imageName", imageName, "imageStatus", imageStatus)
 		}
 		if imageStatus == nil {
 			continue

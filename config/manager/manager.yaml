@@ -35,7 +35,7 @@ spec:
         - --enable-leader-election
         - --logtostderr=true
         - --v=5
-        - --feature-gates=AllAlpha=true
+        - --feature-gates=AllAlpha=true,EnableExternalCerts=false
         image: controller:latest
         imagePullPolicy: Always
         securityContext:
@@ -60,8 +60,8 @@ spec:
             port: 8000
         resources:
           limits:
-            cpu: 100m
-            memory: 200Mi
+            cpu: 2
+            memory: 2Gi
           requests:
             cpu: 100m
             memory: 200Mi

@@ -28,6 +28,8 @@ import (
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
+	"github.com/openkruise/kruise/pkg/util/fieldindex"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -245,6 +247,7 @@ func TestReconcilePersistentPodState(t *testing.T) {
 					// 9 is deleted, but 8 is running
 					if i == 9 {
 						pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+						pod.Finalizers = []string{"finalizers.sigs.k8s.io/test"}
 					}
 					pods = append(pods, pod)
 				}
@@ -340,6 +343,7 @@ func TestReconcilePersistentPodState(t *testing.T) {
 					// 12 is deleted, but 11 is running
 					if i == 12 {
 						pod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+						pod.Finalizers = []string{"finalizers.sigs.k8s.io/test"}
 					}
 					pods = append(pods, pod)
 				}
@@ -518,7 +522,14 @@ func TestReconcilePersistentPodState(t *testing.T) {
 			for _, pod := range pods {
 				clientBuilder.WithObjects(pod)
 			}
-			fakeClient := clientBuilder.Build()
+			clientBuilder.WithStatusSubresource(&appsv1alpha1.PersistentPodState{})
+			fakeClient := clientBuilder.WithIndex(&corev1.Pod{}, fieldindex.IndexNameForOwnerRefUID, func(obj client.Object) []string {
+				var owners []string
+				for _, ref := range obj.GetOwnerReferences() {
+					owners = append(owners, string(ref.UID))
+				}
+				return owners
+			}).Build()
 			reconciler := ReconcilePersistentPodState{
 				Client: fakeClient,
 				finder: &controllerfinder.ControllerFinder{Client: fakeClient},

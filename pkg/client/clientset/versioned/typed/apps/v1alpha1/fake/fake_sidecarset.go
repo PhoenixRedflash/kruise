@@ -23,7 +23,6 @@ import (
 	v1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -34,9 +33,9 @@ type FakeSidecarSets struct {
 	Fake *FakeAppsV1alpha1
 }
 
-var sidecarsetsResource = schema.GroupVersionResource{Group: "apps.kruise.io", Version: "v1alpha1", Resource: "sidecarsets"}
+var sidecarsetsResource = v1alpha1.SchemeGroupVersion.WithResource("sidecarsets")
 
-var sidecarsetsKind = schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "SidecarSet"}
+var sidecarsetsKind = v1alpha1.SchemeGroupVersion.WithKind("SidecarSet")
 
 // Get takes name of the sidecarSet, and returns the corresponding sidecarSet object, and an error if there is any.
 func (c *FakeSidecarSets) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.SidecarSet, err error) {
@@ -109,7 +108,7 @@ func (c *FakeSidecarSets) UpdateStatus(ctx context.Context, sidecarSet *v1alpha1
 // Delete takes name of the sidecarSet and deletes it. Returns an error if one occurs.
 func (c *FakeSidecarSets) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewRootDeleteAction(sidecarsetsResource, name), &v1alpha1.SidecarSet{})
+		Invokes(testing.NewRootDeleteActionWithOptions(sidecarsetsResource, name, opts), &v1alpha1.SidecarSet{})
 	return err
 }
 

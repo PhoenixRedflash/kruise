@@ -4,11 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
-	"github.com/openkruise/kruise/pkg/util"
-	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -21,6 +16,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
+	"github.com/openkruise/kruise/pkg/util"
+	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
+	"github.com/openkruise/kruise/pkg/webhook/util/convertor"
 )
 
 func (h *CloneSetCreateUpdateHandler) validateCloneSet(cloneSet, oldCloneSet *appsv1alpha1.CloneSet) field.ErrorList {
@@ -40,7 +41,7 @@ func (h *CloneSetCreateUpdateHandler) validateCloneSetSpec(spec, oldSpec *appsv1
 	if spec.Selector == nil {
 		allErrs = append(allErrs, field.Required(fldPath.Child("selector"), ""))
 	} else {
-		allErrs = append(allErrs, unversionedvalidation.ValidateLabelSelector(spec.Selector, fldPath.Child("selector"))...)
+		allErrs = append(allErrs, unversionedvalidation.ValidateLabelSelector(spec.Selector, unversionedvalidation.LabelSelectorValidationOptions{}, fldPath.Child("selector"))...)
 		if len(spec.Selector.MatchLabels)+len(spec.Selector.MatchExpressions) == 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, "empty selector is invalid for cloneset"))
 		}
@@ -115,7 +116,7 @@ func (h *CloneSetCreateUpdateHandler) validateScaleStrategy(strategy, oldStrateg
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("podsToDelete"), podName, fmt.Sprintf("find pod %s failed: %v", podName, err)))
 		} else if pod.DeletionTimestamp != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("podsToDelete"), podName, fmt.Sprintf("find pod %s already terminating", podName)))
-		} else if owner := metav1.GetControllerOf(pod); owner.UID != metadata.UID {
+		} else if owner := metav1.GetControllerOf(pod); owner == nil || owner.UID != metadata.UID {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("podsToDelete"), podName, fmt.Sprintf("find pod %s owner is not this CloneSet", podName)))
 		}
 	}

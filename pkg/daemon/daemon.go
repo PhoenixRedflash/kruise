@@ -98,7 +98,7 @@ func NewDaemon(cfg *rest.Config, bindAddress string) (Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	klog.Infof("Starting daemon on %v ...", nodeName)
+	klog.InfoS("Starting daemon", "nodeName", nodeName)
 
 	listener, err := net.Listen("tcp", bindAddress)
 	if err != nil {
@@ -139,7 +139,7 @@ func NewDaemon(cfg *rest.Config, bindAddress string) (Daemon, error) {
 		Healthz:        healthz,
 	}
 
-	puller, err := imagepuller.NewController(opts, secretManager)
+	puller, err := imagepuller.NewController(opts, secretManager, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to new image puller controller: %v", err)
 	}

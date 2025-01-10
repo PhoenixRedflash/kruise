@@ -24,7 +24,6 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -36,9 +35,9 @@ type FakeUnitedDeployments struct {
 	ns   string
 }
 
-var uniteddeploymentsResource = schema.GroupVersionResource{Group: "apps.kruise.io", Version: "v1alpha1", Resource: "uniteddeployments"}
+var uniteddeploymentsResource = v1alpha1.SchemeGroupVersion.WithResource("uniteddeployments")
 
-var uniteddeploymentsKind = schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "UnitedDeployment"}
+var uniteddeploymentsKind = v1alpha1.SchemeGroupVersion.WithKind("UnitedDeployment")
 
 // Get takes name of the unitedDeployment, and returns the corresponding unitedDeployment object, and an error if there is any.
 func (c *FakeUnitedDeployments) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.UnitedDeployment, err error) {
@@ -117,7 +116,7 @@ func (c *FakeUnitedDeployments) UpdateStatus(ctx context.Context, unitedDeployme
 // Delete takes name of the unitedDeployment and deletes it. Returns an error if one occurs.
 func (c *FakeUnitedDeployments) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(uniteddeploymentsResource, c.ns, name), &v1alpha1.UnitedDeployment{})
+		Invokes(testing.NewDeleteActionWithOptions(uniteddeploymentsResource, c.ns, name, opts), &v1alpha1.UnitedDeployment{})
 
 	return err
 }

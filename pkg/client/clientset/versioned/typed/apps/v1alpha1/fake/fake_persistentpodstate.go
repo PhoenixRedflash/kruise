@@ -23,7 +23,6 @@ import (
 	v1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -35,9 +34,9 @@ type FakePersistentPodStates struct {
 	ns   string
 }
 
-var persistentpodstatesResource = schema.GroupVersionResource{Group: "apps.kruise.io", Version: "v1alpha1", Resource: "persistentpodstates"}
+var persistentpodstatesResource = v1alpha1.SchemeGroupVersion.WithResource("persistentpodstates")
 
-var persistentpodstatesKind = schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "PersistentPodState"}
+var persistentpodstatesKind = v1alpha1.SchemeGroupVersion.WithKind("PersistentPodState")
 
 // Get takes name of the persistentPodState, and returns the corresponding persistentPodState object, and an error if there is any.
 func (c *FakePersistentPodStates) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.PersistentPodState, err error) {
@@ -116,7 +115,7 @@ func (c *FakePersistentPodStates) UpdateStatus(ctx context.Context, persistentPo
 // Delete takes name of the persistentPodState and deletes it. Returns an error if one occurs.
 func (c *FakePersistentPodStates) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewDeleteAction(persistentpodstatesResource, c.ns, name), &v1alpha1.PersistentPodState{})
+		Invokes(testing.NewDeleteActionWithOptions(persistentpodstatesResource, c.ns, name, opts), &v1alpha1.PersistentPodState{})
 
 	return err
 }
