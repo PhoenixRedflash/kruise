@@ -17,9 +17,9 @@ limitations under the License.
 package sidecarterminator
 
 import (
+	"context"
 	"strings"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,18 +28,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
-var _ handler.EventHandler = &enqueueRequestForPod{}
+var _ handler.TypedEventHandler[*corev1.Pod] = &enqueueRequestForPod{}
 
 type enqueueRequestForPod struct{}
 
-func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface)   {}
-func (p *enqueueRequestForPod) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {}
-func (p *enqueueRequestForPod) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Delete(ctx context.Context, evt event.TypedDeleteEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+}
+func (p *enqueueRequestForPod) Generic(ctx context.Context, evt event.TypedGenericEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+}
+func (p *enqueueRequestForPod) Create(ctx context.Context, evt event.TypedCreateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 	p.handlePodCreate(q, evt.Object)
 }
-func (p *enqueueRequestForPod) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Update(ctx context.Context, evt event.TypedUpdateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 	p.handlePodUpdate(q, evt.ObjectOld, evt.ObjectNew)
 }
 
@@ -74,12 +78,13 @@ func (p *enqueueRequestForPod) handlePodUpdate(q workqueue.RateLimitingInterface
 
 func isInterestingPod(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil ||
-		pod.Status.Phase != corev1.PodRunning ||
+		pod.Status.Phase == corev1.PodPending ||
 		pod.Spec.RestartPolicy == corev1.RestartPolicyAlways {
 		return false
 	}
 
-	if containersCompleted(pod, getSidecar(pod)) {
+	sidecars := getSidecar(pod)
+	if sidecars.Len() == 0 || containersCompleted(pod, sidecars) {
 		return false
 	}
 

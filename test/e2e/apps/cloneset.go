@@ -21,16 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
-	"github.com/openkruise/kruise/pkg/controller/cloneset/utils"
-	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/test/e2e/framework"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -43,6 +38,13 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	utilpointer "k8s.io/utils/pointer"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
+	"github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/util"
+	"github.com/openkruise/kruise/test/e2e/framework"
 )
 
 var _ = SIGDescribe("CloneSet", func() {
@@ -794,7 +796,7 @@ var _ = SIGDescribe("CloneSet", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "data-vol1"},
 					Spec: v1.PersistentVolumeClaimSpec{
 						AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-						Resources: v1.ResourceRequirements{
+						Resources: v1.VolumeResourceRequirements{
 							Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
 						},
 					},
@@ -803,7 +805,7 @@ var _ = SIGDescribe("CloneSet", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "data-vol2"},
 					Spec: v1.PersistentVolumeClaimSpec{
 						AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-						Resources: v1.ResourceRequirements{
+						Resources: v1.VolumeResourceRequirements{
 							Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
 						},
 					},
@@ -1065,6 +1067,15 @@ var _ = SIGDescribe("CloneSet", func() {
 				return len(updated) == 3 && len(current) == 0 && len(preUpdateIndex) == 0
 			}, 120*time.Second, 3*time.Second).Should(gomega.BeTrue())
 		})
+
+		ginkgo.It(`CloneSet Update with VolumeClaimTemplate changes`, func() {
+			testUpdateVolumeClaimTemplates(tester, randStr, c)
+		})
+
+		ginkgo.It(`change resource and qos -> succeed to recreate`, func() {
+			testChangePodQOS(tester, randStr, c)
+		})
+
 	})
 
 	framework.KruiseDescribe("CloneSet pre-download images", func() {
@@ -1112,3 +1123,256 @@ var _ = SIGDescribe("CloneSet", func() {
 		})
 	})
 })
+
+func testChangePodQOS(tester *framework.CloneSetTester, randStr string, c clientset.Interface) {
+	cs := tester.NewCloneSet("clone-"+randStr, 1, appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType})
+	cs.Spec.Template.Spec.Containers[0].Image = NginxImage
+	cs.Spec.Template.ObjectMeta.Labels["test-env"] = "foo"
+	cs.Spec.Template.Spec.Containers[0].Env = append(cs.Spec.Template.Spec.Containers[0].Env, v1.EnvVar{
+		Name:      "TEST_ENV",
+		ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "metadata.labels['test-env']"}},
+	})
+	cs, err := tester.CreateCloneSet(cs)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(cs.Spec.UpdateStrategy.Type).To(gomega.Equal(appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType))
+
+	ginkgo.By("Wait for replicas satisfied")
+	gomega.Eventually(func() int32 {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		return cs.Status.Replicas
+	}, 3*time.Second, time.Second).Should(gomega.Equal(int32(1)))
+
+	ginkgo.By("Wait for all pods ready")
+	gomega.Eventually(func() int32 {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		return cs.Status.ReadyReplicas
+	}, 120*time.Second, 3*time.Second).Should(gomega.Equal(int32(1)))
+
+	pods, err := tester.ListPodsForCloneSet(cs.Name)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(len(pods)).Should(gomega.Equal(1))
+	oldPodUID := pods[0].UID
+
+	ginkgo.By("Update resource and qos")
+	err = tester.UpdateCloneSet(cs.Name, func(cs *appsv1alpha1.CloneSet) {
+		cs.Spec.Template.Spec.Containers[0].Resources = v1.ResourceRequirements{
+			Requests: map[v1.ResourceName]resource.Quantity{
+				v1.ResourceCPU:    resource.MustParse("1"),
+				v1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			Limits: map[v1.ResourceName]resource.Quantity{
+				v1.ResourceCPU:    resource.MustParse("1"),
+				v1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+		}
+	})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	ginkgo.By("Wait for CloneSet generation consistent")
+	gomega.Eventually(func() bool {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		return cs.Generation == cs.Status.ObservedGeneration
+	}, 10*time.Second, 3*time.Second).Should(gomega.Equal(true))
+
+	ginkgo.By("Wait for all pods updated and ready")
+	gomega.Eventually(func() int32 {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		return cs.Status.UpdatedReadyReplicas
+	}, 180*time.Second, 3*time.Second).Should(gomega.Equal(int32(1)))
+
+	ginkgo.By("Verify the podID changed")
+	pods, err = tester.ListPodsForCloneSet(cs.Name)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(len(pods)).Should(gomega.Equal(1))
+	newPodUID := pods[0].UID
+
+	gomega.Expect(oldPodUID).ShouldNot(gomega.Equal(newPodUID))
+}
+
+func checkPVCsDoRecreate(numsOfPVCs int, recreate bool) func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+	return func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+		gomega.Expect(len(pvcs)).Should(gomega.Equal(numsOfPVCs))
+		for _, pvc := range pvcs {
+			id := pvc.Labels[appsv1alpha1.CloneSetInstanceID]
+			gomega.Expect(newInstanceIds.Has(id)).To(gomega.Equal(true))
+			gomega.Expect(instanceIds.Has(id)).To(gomega.Equal(!recreate))
+			gomega.Expect(pvcIds.Has(pvc.Name)).To(gomega.Equal(!recreate))
+		}
+	}
+}
+
+func checkPodsDoRecreate(numsOfPods int, recreate bool) func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+	return func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+		gomega.Expect(len(pods)).Should(gomega.Equal(numsOfPods))
+		for _, pod := range pods {
+			gomega.Expect(instanceIds.Has(pod.Labels[appsv1alpha1.CloneSetInstanceID])).To(gomega.Equal(!recreate))
+		}
+	}
+}
+
+func changeCloneSetAndWaitReady(tester *framework.CloneSetTester, cs *appsv1alpha1.CloneSet,
+	fn func(cs *appsv1alpha1.CloneSet), instanceIds, pvcIds sets.String,
+	checkFns ...func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim)) (sets.String, sets.String) {
+	err := tester.UpdateCloneSet(cs.Name, fn)
+
+	replica := *cs.Spec.Replicas
+	ginkgo.By("Wait for replicas satisfied")
+	gomega.Eventually(func() int32 {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		return cs.Status.Replicas
+	}, 3*time.Second, time.Second).Should(gomega.Equal(replica))
+	time.Sleep(time.Second * 3)
+
+	ginkgo.By("Wait for all pods ready")
+	gomega.Eventually(func() int32 {
+		cs, err = tester.GetCloneSet(cs.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		if cs.Status.ObservedGeneration != cs.Generation {
+			return -1
+		}
+		return cs.Status.UpdatedReadyReplicas
+	}, 120*time.Second, 3*time.Second).Should(gomega.Equal(*cs.Spec.Replicas))
+
+	pods, err := tester.ListPodsForCloneSet(cs.Name)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(int32(len(pods))).Should(gomega.Equal(replica))
+	newInstanceIds := sets.NewString()
+	for _, pod := range pods {
+		newInstanceIds.Insert(pod.Labels[appsv1alpha1.CloneSetInstanceID])
+	}
+	pvcs, err := tester.ListPVCForCloneSet()
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	if len(instanceIds) > 0 && len(pvcIds) > 0 {
+		for _, checkFn := range checkFns {
+			checkFn(instanceIds, newInstanceIds, pvcIds, pods, pvcs)
+		}
+	}
+
+	// record new pvcIds
+	newPvcIds := sets.NewString()
+	for _, pvc := range pvcs {
+		gomega.Expect(newInstanceIds.Has(pvc.Labels[appsv1alpha1.CloneSetInstanceID])).Should(gomega.BeTrue())
+		newPvcIds.Insert(pvc.Name)
+	}
+
+	return newInstanceIds, newPvcIds
+}
+
+func testUpdateVolumeClaimTemplates(tester *framework.CloneSetTester, randStr string, c clientset.Interface) {
+	updateStrategy := appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.RecreateCloneSetUpdateStrategyType}
+	var replicas int = 4
+	cs := tester.NewCloneSet("clone-"+randStr, int32(replicas), updateStrategy)
+	imageConfig := imageutils.GetConfig(imageutils.Nginx)
+	imageConfig.SetRegistry("docker.io/library")
+	imageConfig.SetVersion("alpine")
+	cs.Spec.Template.Spec.Containers[0].Image = imageConfig.GetE2EImage()
+	cs.Spec.VolumeClaimTemplates = []v1.PersistentVolumeClaim{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "data-vol1"},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "data-vol2"},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
+				},
+			},
+		},
+	}
+	cs, err := tester.CreateCloneSet(cs)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(cs.Spec.UpdateStrategy.Type).To(gomega.Equal(appsv1alpha1.RecreateCloneSetUpdateStrategyType))
+
+	instanceIds, pvcIds := changeCloneSetAndWaitReady(tester, cs, func(cs *appsv1alpha1.CloneSet) {}, nil, nil)
+
+	numsOfPVCs := replicas * 2
+	checkPVCSize1 := func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+		gomega.Expect(len(pvcs)).Should(gomega.Equal(numsOfPVCs))
+		for _, pvc := range pvcs {
+			id := pvc.Labels[appsv1alpha1.CloneSetInstanceID]
+			gomega.Expect(newInstanceIds.Has(id)).To(gomega.Equal(true))
+			req := "1Gi"
+			if strings.Contains(pvc.Name, "data-vol1") {
+				req = "2Gi"
+			}
+			gomega.Expect(pvc.Spec.Resources.Requests.Storage().String()).To(gomega.Equal(req))
+		}
+	}
+	// update cloneSet image + vct size
+	ginkgo.By("Update cloneSet image and volumeClaimTemplates")
+	updateImageAndVCTFn := func(cs *appsv1alpha1.CloneSet) {
+		imageConfig = imageutils.GetConfig(imageutils.NginxNew)
+		cs.Spec.Template.Spec.Containers[0].Image = imageConfig.GetE2EImage()
+		cs.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests = v1.ResourceList{v1.ResourceStorage: resource.MustParse("2Gi")}
+		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType}
+	}
+	instanceIds, pvcIds = changeCloneSetAndWaitReady(tester, cs, updateImageAndVCTFn,
+		instanceIds, pvcIds, checkPodsDoRecreate(replicas, true),
+		checkPVCsDoRecreate(replicas*2, true), checkPVCSize1)
+
+	// update cloneSet only size
+	ginkgo.By("Update cloneSet only volumeClaimTemplates")
+	updateVCTOnly := func(cs *appsv1alpha1.CloneSet) {
+		cs.Spec.VolumeClaimTemplates[1].Spec.Resources.Requests = v1.ResourceList{v1.ResourceStorage: resource.MustParse("2Gi")}
+		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType}
+	}
+	instanceIds, pvcIds = changeCloneSetAndWaitReady(tester, cs, updateVCTOnly,
+		instanceIds, pvcIds, checkPodsDoRecreate(replicas, false),
+		checkPVCsDoRecreate(replicas*2, false), checkPVCSize1)
+
+	checkPVCSize2 := func(instanceIds, newInstanceIds, pvcIds sets.String, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) {
+		gomega.Expect(len(pvcs)).Should(gomega.Equal(numsOfPVCs))
+		for _, pvc := range pvcs {
+			id := pvc.Labels[appsv1alpha1.CloneSetInstanceID]
+			gomega.Expect(newInstanceIds.Has(id)).To(gomega.Equal(true))
+			req := "2Gi"
+			gomega.Expect(pvc.Spec.Resources.Requests.Storage().String()).To(gomega.Equal(req))
+		}
+	}
+
+	// update cloneSet image
+	ginkgo.By("Update cloneSet image and vct size changed in previous step")
+	updateImageOnly := func(cs *appsv1alpha1.CloneSet) {
+		imageConfig = imageutils.GetConfig(imageutils.Redis)
+		cs.Spec.Template.Spec.Containers[0].Image = imageConfig.GetE2EImage()
+		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType}
+	}
+	instanceIds, pvcIds = changeCloneSetAndWaitReady(tester, cs, updateImageOnly,
+		instanceIds, pvcIds, checkPodsDoRecreate(replicas, true),
+		checkPVCsDoRecreate(replicas*2, true), checkPVCSize2)
+
+	// inplace-only update strategy with image change
+	inplaceOnlyWithImage := func(cs *appsv1alpha1.CloneSet) {
+		imageConfig = imageutils.GetConfig(imageutils.Httpd)
+		cs.Spec.Template.Spec.Containers[0].Image = imageConfig.GetE2EImage()
+		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType}
+	}
+	instanceIds, pvcIds = changeCloneSetAndWaitReady(tester, cs, inplaceOnlyWithImage,
+		instanceIds, pvcIds, checkPodsDoRecreate(replicas, false),
+		checkPVCsDoRecreate(replicas*2, false), checkPVCSize2)
+
+	// inplace-only update strategy with image and vct changes -> in-place update with pvc no changes
+	inplaceOnlyWithImageAndVCT := func(cs *appsv1alpha1.CloneSet) {
+		imageConfig = imageutils.GetConfig(imageutils.Redis)
+		cs.Spec.Template.Spec.Containers[0].Image = imageConfig.GetE2EImage()
+		cs.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests = v1.ResourceList{v1.ResourceStorage: resource.MustParse("3Gi")}
+		cs.Spec.VolumeClaimTemplates[1].Spec.Resources.Requests = v1.ResourceList{v1.ResourceStorage: resource.MustParse("3Gi")}
+		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{Type: appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType}
+	}
+	instanceIds, pvcIds = changeCloneSetAndWaitReady(tester, cs, inplaceOnlyWithImageAndVCT,
+		instanceIds, pvcIds, checkPodsDoRecreate(replicas, false),
+		checkPVCsDoRecreate(replicas*2, false), checkPVCSize2)
+}

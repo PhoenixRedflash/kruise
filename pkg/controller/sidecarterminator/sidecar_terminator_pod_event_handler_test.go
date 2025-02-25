@@ -17,6 +17,7 @@ limitations under the License.
 package sidecarterminator
 
 import (
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -143,6 +144,48 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 			expectLen: 0,
 		},
 		{
+			name: "Pod, main container completed -> completed, sidecar container completed and pod has reached succeeded phase",
+			getOldPod: func() *corev1.Pod {
+				oldPod := oldPodDemo.DeepCopy()
+				oldPod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					succeededMainContainerStatus,
+					completedSidecarContainerStatus,
+				}
+				return oldPod
+			},
+			getNewPod: func() *corev1.Pod {
+				newPod := newPodDemo.DeepCopy()
+				newPod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					succeededMainContainerStatus,
+					completedSidecarContainerStatus,
+				}
+				newPod.Status.Phase = corev1.PodSucceeded
+				return newPod
+			},
+			expectLen: 0,
+		},
+		{
+			name: "Pod, main container completed -> completed, sidecar container failed and pod has reached succeeded phase",
+			getOldPod: func() *corev1.Pod {
+				oldPod := oldPodDemo.DeepCopy()
+				oldPod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					succeededMainContainerStatus,
+					completedSidecarContainerStatus,
+				}
+				return oldPod
+			},
+			getNewPod: func() *corev1.Pod {
+				newPod := newPodDemo.DeepCopy()
+				newPod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					succeededMainContainerStatus,
+					failedSidecarContainerStatus,
+				}
+				newPod.Status.Phase = corev1.PodSucceeded
+				return newPod
+			},
+			expectLen: 0,
+		},
+		{
 			name: "Pod, main container completed -> uncompleted, sidecar container completed",
 			getOldPod: func() *corev1.Pod {
 				oldPod := oldPodDemo.DeepCopy()
@@ -207,12 +250,12 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 	for _, cs := range cases {
 		t.Run(cs.name, func(t *testing.T) {
 			eventHandler := &enqueueRequestForPod{}
-			evt := event.UpdateEvent{
+			evt := event.TypedUpdateEvent[*corev1.Pod]{
 				ObjectOld: cs.getOldPod(),
 				ObjectNew: cs.getNewPod(),
 			}
 			que := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-			eventHandler.Update(evt, que)
+			eventHandler.Update(context.TODO(), evt, que)
 			if que.Len() != cs.expectLen {
 				t.Fatalf("Get unexpected queue length, expected %v, actual %v", cs.expectLen, que.Len())
 			}
@@ -260,13 +303,27 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 			expectLen: 1,
 		},
 		{
-			name: "Pod, main container completed, sidecar container completed",
+			name: "Pod, main container completed, sidecar container completed and pod has reached succeeded phase",
 			getPod: func() *corev1.Pod {
 				newPod := demoPod.DeepCopy()
 				newPod.Status.ContainerStatuses = []corev1.ContainerStatus{
 					succeededMainContainerStatus,
 					completedSidecarContainerStatus,
 				}
+				newPod.Status.Phase = corev1.PodSucceeded
+				return newPod
+			},
+			expectLen: 0,
+		},
+		{
+			name: "Pod, main container completed, sidecar container failed and pod has reached succeeded phase",
+			getPod: func() *corev1.Pod {
+				newPod := demoPod.DeepCopy()
+				newPod.Status.ContainerStatuses = []corev1.ContainerStatus{
+					succeededMainContainerStatus,
+					failedSidecarContainerStatus,
+				}
+				newPod.Status.Phase = corev1.PodSucceeded
 				return newPod
 			},
 			expectLen: 0,
@@ -300,11 +357,11 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 	for _, cs := range cases {
 		t.Run(cs.name, func(t *testing.T) {
 			eventHandler := &enqueueRequestForPod{}
-			evt := event.CreateEvent{
+			evt := event.TypedCreateEvent[*corev1.Pod]{
 				Object: cs.getPod(),
 			}
 			que := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-			eventHandler.Create(evt, que)
+			eventHandler.Create(context.TODO(), evt, que)
 			if que.Len() != cs.expectLen {
 				t.Fatalf("Get unexpected queue length, expected %v, actual %v", cs.expectLen, que.Len())
 			}

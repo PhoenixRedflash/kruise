@@ -52,10 +52,10 @@ const (
 	CloneSetPartitionRollback featuregate.Feature = "CloneSetPartitionRollback"
 
 	// ResourcesDeletionProtection enables protection for resources deletion, currently supports
-	// Namespace, CustomResourcesDefinition, Deployment, StatefulSet, ReplicaSet, CloneSet, Advanced StatefulSet, UnitedDeployment.
+	// Namespace, Service, Ingress, CustomResourcesDefinition, Deployment, StatefulSet, ReplicaSet, CloneSet, Advanced StatefulSet, UnitedDeployment.
 	// It is only supported for Kubernetes version >= 1.16
 	// Note that if it is enabled during Kruise installation or upgrade, Kruise will require more authorities:
-	// 1. Webhook for deletion operation of namespace, crd, deployment, statefulset, replicaset and workloads in Kruise.
+	// 1. Webhook for deletion operation of namespace, service, ingress, crd, deployment, statefulset, replicaset and workloads in Kruise.
 	ResourcesDeletionProtection featuregate.Feature = "ResourcesDeletionProtection"
 
 	// PodUnavailableBudgetDeleteGate enables PUB capability to protect pod from deletion and eviction
@@ -113,6 +113,34 @@ const (
 
 	// DeletionProtectionForCRDCascadingGate enable deletionProtection for crd Cascading
 	DeletionProtectionForCRDCascadingGate featuregate.Feature = "DeletionProtectionForCRDCascadingGate"
+
+	// Enables a enhanced livenessProbe solution
+	EnhancedLivenessProbeGate featuregate.Feature = "EnhancedLivenessProbe"
+
+	// RecreatePodWhenChangeVCTInCloneSetGate recreate the pod upon changing volume claim templates in a clone set to ensure PVC consistency.
+	RecreatePodWhenChangeVCTInCloneSetGate featuregate.Feature = "RecreatePodWhenChangeVCTInCloneSetGate"
+
+	// Enables a StatefulSet to start from an arbitrary non zero ordinal
+	StatefulSetStartOrdinal featuregate.Feature = "StatefulSetStartOrdinal"
+
+	// Set pod completion index as a pod label for Indexed Jobs.
+	PodIndexLabel featuregate.Feature = "PodIndexLabel"
+
+	// Use certs generated externally
+	EnableExternalCerts featuregate.Feature = "EnableExternalCerts"
+
+	// Enables policies auto resizing PVCs created by a StatefulSet when user expands volumeClaimTemplates.
+	StatefulSetAutoResizePVCGate featuregate.Feature = "StatefulSetAutoResizePVCGate"
+
+	// ForceDeleteTimeoutExpectationFeatureGate enable delete timeout expectation, for example: cloneSet ScaleExpectation
+	ForceDeleteTimeoutExpectationFeatureGate = "ForceDeleteTimeoutExpectationGate"
+
+	// InPlaceWorkloadVerticalScaling enable CloneSet/Advanced StatefulSet controller to support vertical scaling
+	// of managed Pods.
+	InPlaceWorkloadVerticalScaling featuregate.Feature = "InPlaceWorkloadVerticalScaling"
+
+	// EnablePodProbeMarkerOnServerless enable PodProbeMarker on Serverless Pod
+	EnablePodProbeMarkerOnServerless featuregate.Feature = "EnablePodProbeMarkerOnServerless"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -124,22 +152,33 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	KruisePodReadinessGate:                    {Default: false, PreRelease: featuregate.Alpha},
 	PreDownloadImageForInPlaceUpdate:          {Default: false, PreRelease: featuregate.Alpha},
 	CloneSetPartitionRollback:                 {Default: false, PreRelease: featuregate.Alpha},
-	ResourcesDeletionProtection:               {Default: true, PreRelease: featuregate.Alpha},
-	WorkloadSpread:                            {Default: true, PreRelease: featuregate.Alpha},
-	PodUnavailableBudgetDeleteGate:            {Default: true, PreRelease: featuregate.Alpha},
+	ResourcesDeletionProtection:               {Default: false, PreRelease: featuregate.Beta},
+	WorkloadSpread:                            {Default: true, PreRelease: featuregate.Beta},
+	PodUnavailableBudgetDeleteGate:            {Default: true, PreRelease: featuregate.Beta},
 	PodUnavailableBudgetUpdateGate:            {Default: false, PreRelease: featuregate.Alpha},
 	TemplateNoDefaults:                        {Default: false, PreRelease: featuregate.Alpha},
-	InPlaceUpdateEnvFromMetadata:              {Default: true, PreRelease: featuregate.Alpha},
-	StatefulSetAutoDeletePVC:                  {Default: true, PreRelease: featuregate.Alpha},
+	InPlaceUpdateEnvFromMetadata:              {Default: true, PreRelease: featuregate.Beta},
+	StatefulSetAutoDeletePVC:                  {Default: true, PreRelease: featuregate.Beta},
 	SidecarSetPatchPodMetadataDefaultsAllowed: {Default: false, PreRelease: featuregate.Alpha},
 	SidecarTerminator:                         {Default: false, PreRelease: featuregate.Alpha},
-	PodProbeMarkerGate:                        {Default: true, PreRelease: featuregate.Alpha},
+	PodProbeMarkerGate:                        {Default: true, PreRelease: featuregate.Beta},
 	PreDownloadImageForDaemonSetUpdate:        {Default: false, PreRelease: featuregate.Alpha},
-	CloneSetEventHandlerOptimization:          {Default: false, PreRelease: featuregate.Alpha},
-	PreparingUpdateAsUpdate:                   {Default: false, PreRelease: featuregate.Alpha},
-	ImagePullJobGate:                          {Default: false, PreRelease: featuregate.Alpha},
-	ResourceDistributionGate:                  {Default: false, PreRelease: featuregate.Alpha},
-	DeletionProtectionForCRDCascadingGate:     {Default: false, PreRelease: featuregate.Alpha},
+
+	CloneSetEventHandlerOptimization:      {Default: false, PreRelease: featuregate.Alpha},
+	PreparingUpdateAsUpdate:               {Default: false, PreRelease: featuregate.Alpha},
+	ImagePullJobGate:                      {Default: false, PreRelease: featuregate.Alpha},
+	ResourceDistributionGate:              {Default: false, PreRelease: featuregate.Alpha},
+	DeletionProtectionForCRDCascadingGate: {Default: false, PreRelease: featuregate.Alpha},
+
+	EnhancedLivenessProbeGate:                {Default: false, PreRelease: featuregate.Alpha},
+	RecreatePodWhenChangeVCTInCloneSetGate:   {Default: false, PreRelease: featuregate.Alpha},
+	StatefulSetStartOrdinal:                  {Default: false, PreRelease: featuregate.Alpha},
+	PodIndexLabel:                            {Default: true, PreRelease: featuregate.Beta},
+	EnableExternalCerts:                      {Default: false, PreRelease: featuregate.Alpha},
+	StatefulSetAutoResizePVCGate:             {Default: false, PreRelease: featuregate.Alpha},
+	ForceDeleteTimeoutExpectationFeatureGate: {Default: false, PreRelease: featuregate.Alpha},
+	InPlaceWorkloadVerticalScaling:           {Default: false, PreRelease: featuregate.Alpha},
+	EnablePodProbeMarkerOnServerless:         {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {
@@ -162,11 +201,12 @@ func compatibleEnv() {
 func SetDefaultFeatureGates() {
 	if !utilfeature.DefaultFeatureGate.Enabled(PodWebhook) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", KruisePodReadinessGate))
-		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", ResourcesDeletionProtection))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", PodUnavailableBudgetDeleteGate))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", PodUnavailableBudgetUpdateGate))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", WorkloadSpread))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", SidecarSetPatchPodMetadataDefaultsAllowed))
+		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", EnhancedLivenessProbeGate))
+		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", EnablePodProbeMarkerOnServerless))
 	}
 	if !utilfeature.DefaultFeatureGate.Enabled(KruiseDaemon) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", PreDownloadImageForInPlaceUpdate))
@@ -176,6 +216,7 @@ func SetDefaultFeatureGates() {
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", PodProbeMarkerGate))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", SidecarTerminator))
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", ImagePullJobGate))
+		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=false", EnhancedLivenessProbeGate))
 	}
 	if utilfeature.DefaultFeatureGate.Enabled(PreDownloadImageForInPlaceUpdate) || utilfeature.DefaultFeatureGate.Enabled(PreDownloadImageForDaemonSetUpdate) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=true", ImagePullJobGate))

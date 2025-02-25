@@ -1,6 +1,5 @@
 /*
 Copyright 2019 The Kruise Authors.
-Copyright 2016 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +18,7 @@ package statefulset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -26,15 +26,20 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	apps "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -42,14 +47,17 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	storagelisters "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/history"
+	testingclock "k8s.io/utils/clock/testing"
 	utilpointer "k8s.io/utils/pointer"
 
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
 	kruisefake "github.com/openkruise/kruise/pkg/client/clientset/versioned/fake"
@@ -57,6 +65,7 @@ import (
 	kruiseappsinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions/apps/v1beta1"
 	kruiseappslisters "github.com/openkruise/kruise/pkg/client/listers/apps/v1beta1"
 	"github.com/openkruise/kruise/pkg/features"
+	"github.com/openkruise/kruise/pkg/util"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 	"github.com/openkruise/kruise/pkg/util/lifecycle"
@@ -2211,6 +2220,153 @@ func TestStatefulSetControlRollingUpdateBlockByMaxUnavailable(t *testing.T) {
 	}
 }
 
+func TestStatefulSetControlRollingUpdateWithSpecifiedDelete(t *testing.T) {
+	set := burst(newStatefulSet(6))
+	var partition int32 = 3
+	var maxUnavailable = intstr.FromInt(3)
+	set.Spec.UpdateStrategy = appsv1beta1.StatefulSetUpdateStrategy{
+		Type: apps.RollingUpdateStatefulSetStrategyType,
+		RollingUpdate: func() *appsv1beta1.RollingUpdateStatefulSetStrategy {
+			return &appsv1beta1.RollingUpdateStatefulSetStrategy{
+				Partition:       &partition,
+				MaxUnavailable:  &maxUnavailable,
+				PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+			}
+		}(),
+	}
+
+	client := fake.NewSimpleClientset()
+	kruiseClient := kruisefake.NewSimpleClientset(set)
+	spc, _, ssc, stop := setupController(client, kruiseClient)
+	defer close(stop)
+	if err := scaleUpStatefulSetControl(set, ssc, spc, assertBurstInvariants); err != nil {
+		t.Fatal(err)
+	}
+	set, err := spc.setsLister.StatefulSets(set.Namespace).Get(set.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// set pod 0 to specified delete
+	originalPods, err := spc.setPodSpecifiedDelete(set, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Sort(ascendingOrdinal(originalPods))
+
+	// start to update
+	set.Spec.Template.Spec.Containers[0].Image = "foo"
+
+	// first update pod 5 only because pod 0 is specified deleted
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, originalPods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// inplace update 5 and create 0
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, pods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods) != 6 {
+		t.Fatalf("Expected create pods 5, got pods %v", pods)
+	}
+	sort.Sort(ascendingOrdinal(pods))
+	_, exist := pods[0].Labels[appsv1alpha1.SpecifiedDeleteKey]
+	assert.True(t, !exist)
+	// pod 0 is old image and pod 5/4 is new image
+	assert.Equal(t, pods[5].Spec.Containers[0].Image, "foo")
+	assert.Equal(t, pods[4].Spec.Containers[0].Image, "foo")
+	assert.Equal(t, pods[0].Spec.Containers[0].Image, "nginx")
+
+	// set pod 1/2/5 to specified deleted and pod 0/4/5 to ready
+	spc.setPodSpecifiedDelete(set, 0)
+	spc.setPodSpecifiedDelete(set, 1)
+	spc.setPodSpecifiedDelete(set, 2)
+	for i := 0; i < 6; i++ {
+		spc.setPodRunning(set, i)
+		spc.setPodReady(set, i)
+	}
+	originalPods, _ = spc.setPodSpecifiedDelete(set, 5)
+	sort.Sort(ascendingOrdinal(originalPods))
+
+	// create new pod for 1/2/5, do not update 3
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, originalPods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create new pods 5 and inplace update 3
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, pods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Sort(ascendingOrdinal(pods))
+	if len(pods) != 6 {
+		t.Fatalf("Expected create pods 5, got pods %v", pods)
+	}
+
+	_, exist = pods[5].Labels[appsv1alpha1.SpecifiedDeleteKey]
+	assert.True(t, !exist)
+	_, exist = pods[2].Labels[appsv1alpha1.SpecifiedDeleteKey]
+	assert.True(t, !exist)
+	_, exist = pods[1].Labels[appsv1alpha1.SpecifiedDeleteKey]
+	assert.True(t, !exist)
+	// pod 0 still undeleted
+	_, exist = pods[0].Labels[appsv1alpha1.SpecifiedDeleteKey]
+	assert.True(t, exist)
+	assert.Equal(t, pods[5].Spec.Containers[0].Image, "foo")
+	assert.Equal(t, pods[3].Spec.Containers[0].Image, "nginx")
+	assert.Equal(t, pods[2].Spec.Containers[0].Image, "nginx")
+	assert.Equal(t, pods[1].Spec.Containers[0].Image, "nginx")
+
+	// set pod 3 to specified deleted and all pod to ready => pod3 will be deleted and updated
+	for i := 0; i < 6; i++ {
+		spc.setPodRunning(set, i)
+		spc.setPodReady(set, i)
+	}
+	originalPods, _ = spc.setPodSpecifiedDelete(set, 3)
+	sort.Sort(ascendingOrdinal(originalPods))
+	// create new pod for 3, do not inplace-update 3
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, originalPods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// create new pods 5 and inplace update 3
+	if err = ssc.UpdateStatefulSet(context.TODO(), set, pods); err != nil {
+		t.Fatal(err)
+	}
+	pods, err = spc.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Sort(ascendingOrdinal(pods))
+	if len(pods) != 6 {
+		t.Fatalf("Expected create pods 5, got pods %v", pods)
+	}
+	assert.Equal(t, pods[3].Spec.Containers[0].Image, "foo")
+}
+
 func TestStatefulSetControlInPlaceUpdate(t *testing.T) {
 	set := burst(newStatefulSet(3))
 	var partition int32 = 1
@@ -2510,6 +2666,804 @@ func TestStatefulSetControlLifecycleHook(t *testing.T) {
 	sort.Sort(ascendingOrdinal(pods))
 	if lifecycle.GetPodLifecycleState(pods[1]) == appspub.LifecycleStatePreparingUpdate {
 		t.Fatalf("Expected pod1 in state %v, actually in state %v", appspub.LifecycleStatePreparingUpdate, lifecycle.GetPodLifecycleState(pods[1]))
+	}
+}
+
+type manageCase struct {
+	name           string
+	set            *appsv1beta1.StatefulSet
+	updateRevision *apps.ControllerRevision
+	revisions      []*apps.ControllerRevision
+	pods           []*v1.Pod
+	expectedPods   []*v1.Pod
+}
+
+func TestUpdateWithLifecycleHook(t *testing.T) {
+	testNs := "test"
+	labelselector, _ := metav1.ParseToLabelSelector("test=asts")
+	maxUnavailable := intstr.FromInt(1)
+	now := metav1.NewTime(time.Unix(time.Now().Add(-time.Hour).Unix(), 0))
+
+	cases := []manageCase{
+		{
+			name: "create: preparingNormal->Normal without hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{Replicas: utilpointer.Int32(1),
+					Selector: labelselector,
+				}},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						UID:       "sts-0-uid",
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+		},
+		{
+			name: "create: preparingNormal->preparingNormal, preNormal does not hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					Replicas:  utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{PreNormal: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preNormalHooked": "true"}}},
+					Selector:  labelselector,
+				}},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						UID:       "sts-0-uid",
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+		},
+		{
+			name: "create: preparingNormal->preparingNormal, preNormal does not all hooked",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					Replicas: utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{
+						PreNormal: &appspub.LifecycleHook{
+							LabelsHandler:     map[string]string{"preNormalHooked": "true"},
+							FinalizersHandler: []string{"slb"},
+						},
+					},
+					Selector: labelselector,
+				}},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						UID:       "sts-0-uid",
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+		},
+		{
+			name: "create: preparingNormal->Normal, preNormal does hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					Replicas:  utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{PreNormal: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preNormalHooked": "true"}}},
+					Selector:  labelselector,
+				}},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							"preNormalHooked":                    "true",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						UID:       "sts-0-uid",
+						Labels: map[string]string{
+							"test":                               "asts",
+							"preNormalHooked":                    "true",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_new",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionFalse},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+		},
+		{
+			name: "recreate update: Parallel-preparingNormal, pre-delete does not hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{
+						PreNormal: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preNormalHooked": "true"}},
+						PreDelete: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preNormalHooked": "true"}},
+					},
+					Selector: labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable: &maxUnavailable,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							"test":                               "asts",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionTrue},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{},
+		},
+		{
+			name: "recreate update: Parallel-preparingNormal, pre-delete does hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{
+						PreNormal: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preNormalHooked": "true"}},
+						PreDelete: &appspub.LifecycleHook{LabelsHandler: map[string]string{"preDeleteHooked": "true"}},
+					},
+					Selector: labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable: &maxUnavailable,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev_new"}},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"preDeleteHooked":                    "true",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionTrue},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"preDeleteHooked":                    "true",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingDelete),
+						},
+						UID: "sts-0-uid",
+					},
+					Spec: v1.PodSpec{ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}}},
+					Status: v1.PodStatus{Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+						{Type: v1.PodReady, Status: v1.ConditionTrue},
+						{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+					}},
+				},
+			},
+		},
+		{
+			name: "in-place update: preparingNormal->Updating, preNormal & InPlaceUpdate does not hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle:           &appspub.Lifecycle{PreNormal: &appspub.LifecycleHook{FinalizersHandler: []string{"slb.com/online"}}},
+					Selector:            labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable:  &maxUnavailable,
+							PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "rev_new"},
+				Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo2"}]}}}}`)},
+			},
+			revisions: []*apps.ControllerRevision{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rev_old"},
+					Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo1"}]}}}}`)},
+				},
+			},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						}},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{Phase: v1.PodRunning,
+						Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"apps.kubernetes.io/pod-index":       "0",
+							"statefulset.kubernetes.io/pod-name": "sts-0",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateUpdating),
+						},
+						Annotations: map[string]string{
+							appspub.InPlaceUpdateStateKey: util.DumpJSON(appspub.InPlaceUpdateState{
+								Revision:               "rev_new",
+								UpdateTimestamp:        metav1.NewTime(now.Time),
+								LastContainerStatuses:  map[string]appspub.InPlaceUpdateContainerStatus{"c1": {ImageID: "image-id-xyz"}},
+								UpdateImages:           true,
+								ContainerBatchesRecord: []appspub.InPlaceUpdateContainerBatch{{Timestamp: now, Containers: []string{"c1"}}},
+							}),
+						},
+						UID: "sts-0-uid",
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo2"}},
+					},
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionFalse, Reason: "StartInPlaceUpdate", LastTransitionTime: now},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+		},
+		{
+			name: "in-place update: preparingNormal->Normal, preNormal & InPlaceUpdate does hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle: &appspub.Lifecycle{PreNormal: &appspub.LifecycleHook{FinalizersHandler: []string{"slb/online"}},
+						InPlaceUpdate: &appspub.LifecycleHook{FinalizersHandler: []string{"slb/online"}}},
+					Selector: labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable:  &maxUnavailable,
+							PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "rev_new"},
+				Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo2"}]}}}}`)},
+			},
+			revisions: []*apps.ControllerRevision{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rev_old"},
+					Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo1"}]}}}}`)},
+				},
+			},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"apps.kubernetes.io/pod-index":       "0",
+							"statefulset.kubernetes.io/pod-name": "sts-0",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingNormal),
+						},
+						Finalizers: []string{"slb/online"},
+					},
+
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{Phase: v1.PodRunning,
+						Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue, LastTransitionTime: now},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"apps.kubernetes.io/pod-index":       "0",
+							"statefulset.kubernetes.io/pod-name": "sts-0",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateNormal),
+						},
+						Finalizers: []string{"slb/online"},
+						UID:        "sts-0-uid",
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue, LastTransitionTime: now},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+		},
+		{
+			name: "in-place update: preparingUpdate->Updating, InPlaceUpdate does not hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle:           &appspub.Lifecycle{InPlaceUpdate: &appspub.LifecycleHook{FinalizersHandler: []string{"slb/online"}}},
+					Selector:            labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable:  &maxUnavailable,
+							PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "rev_new"},
+				Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo2"}]}}}}`)},
+			},
+			revisions: []*apps.ControllerRevision{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rev_old"},
+					Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo1"}]}}}}`)},
+				},
+			},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingUpdate),
+						}},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{Phase: v1.PodRunning,
+						Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"apps.kubernetes.io/pod-index":       "0",
+							"statefulset.kubernetes.io/pod-name": "sts-0",
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_new",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateUpdating),
+						},
+						Annotations: map[string]string{
+							appspub.InPlaceUpdateStateKey: util.DumpJSON(appspub.InPlaceUpdateState{
+								Revision:               "rev_new",
+								UpdateTimestamp:        metav1.NewTime(now.Time),
+								LastContainerStatuses:  map[string]appspub.InPlaceUpdateContainerStatus{"c1": {ImageID: "image-id-xyz"}},
+								UpdateImages:           true,
+								ContainerBatchesRecord: []appspub.InPlaceUpdateContainerBatch{{Timestamp: now, Containers: []string{"c1"}}},
+							}),
+						},
+						UID: "sts-0-uid",
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo2"}},
+					},
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionFalse, Reason: "StartInPlaceUpdate", LastTransitionTime: now},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+		},
+		{
+			name: "in-place update: Updated->Normal, InPlaceUpdate does not hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle:           &appspub.Lifecycle{InPlaceUpdate: &appspub.LifecycleHook{FinalizersHandler: []string{"slb/online"}}},
+					Selector:            labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable:  &maxUnavailable,
+							PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "rev_new"},
+				Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo2"}]}}}}`)},
+			},
+			revisions: []*apps.ControllerRevision{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rev_old"},
+					Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo1"}]}}}}`)},
+				},
+			},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateUpdated),
+						},
+						Finalizers: []string{"slb/online"},
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{Phase: v1.PodRunning,
+						Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateNormal),
+						},
+						Finalizers: []string{"slb/online"},
+						UID:        "sts-0-uid",
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+		},
+		{
+			name: "in-place update: Normal->PrepareUpdating, InPlaceUpdate does hook",
+			set: &appsv1beta1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "sts", Namespace: testNs},
+				Spec: appsv1beta1.StatefulSetSpec{
+					PodManagementPolicy: apps.ParallelPodManagement,
+					Replicas:            utilpointer.Int32(1),
+					Lifecycle:           &appspub.Lifecycle{InPlaceUpdate: &appspub.LifecycleHook{FinalizersHandler: []string{"slb/online"}}},
+					Selector:            labelselector,
+					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
+						Type: apps.RollingUpdateStatefulSetStrategyType,
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{
+							MaxUnavailable:  &maxUnavailable,
+							PodUpdatePolicy: appsv1beta1.InPlaceIfPossiblePodUpdateStrategyType,
+						},
+					},
+				},
+			},
+			updateRevision: &apps.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "rev_new"},
+				Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo2"}]}}}}`)},
+			},
+			revisions: []*apps.ControllerRevision{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rev_old"},
+					Data:       apiruntime.RawExtension{Raw: []byte(`{"spec":{"template":{"$patch":"replace","spec":{"containers":[{"name":"c1","image":"foo1"}]}}}}`)},
+				},
+			},
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStateNormal),
+						},
+						Finalizers: []string{"slb/online"},
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{Phase: v1.PodRunning,
+						Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+			expectedPods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sts-0",
+						Namespace: testNs,
+						Labels: map[string]string{
+							"test":                               "asts",
+							apps.ControllerRevisionHashLabelKey:  "rev_old",
+							apps.DefaultDeploymentUniqueLabelKey: "rev_old",
+							appspub.LifecycleStateKey:            string(appspub.LifecycleStatePreparingUpdate),
+						},
+						Finalizers: []string{"slb/online"},
+						UID:        "sts-0-uid",
+					},
+					Spec: v1.PodSpec{
+						ReadinessGates: []v1.PodReadinessGate{{ConditionType: appspub.InPlaceUpdateReady}},
+						Containers:     []v1.Container{{Name: "c1", Image: "foo1"}},
+					},
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning, Conditions: []v1.PodCondition{
+							{Type: v1.PodReady, Status: v1.ConditionTrue},
+							{Type: appspub.InPlaceUpdateReady, Status: v1.ConditionTrue},
+						},
+						ContainerStatuses: []v1.ContainerStatus{{Name: "c1", ImageID: "image-id-xyz"}},
+					},
+				},
+			},
+		},
+	}
+	inplaceupdate.Clock = testingclock.NewFakeClock(now.Time)
+	for _, mc := range cases {
+		t.Run(mc.name, func(t *testing.T) {
+			updateExpectations.DeleteExpectations(getStatefulSetKey(mc.set))
+			fakeClient := fake.NewSimpleClientset()
+			kruiseClient := kruisefake.NewSimpleClientset(mc.set)
+			om, _, ssc, stop := setupController(fakeClient, kruiseClient)
+			stsController := ssc.(*defaultStatefulSetControl)
+			defer close(stop)
+
+			spc := stsController.podControl
+			for _, po := range mc.pods {
+				err := spc.objectMgr.CreatePod(context.TODO(), po)
+				assert.Nil(t, err)
+			}
+
+			currentRevision := mc.updateRevision
+			if len(mc.revisions) > 0 {
+				currentRevision = mc.revisions[0]
+			}
+			if _, err := stsController.updateStatefulSet(context.TODO(), mc.set, currentRevision, mc.updateRevision, 0, mc.pods, mc.revisions); err != nil {
+				t.Fatalf("Failed to test %s, manage error: %v", mc.name, err)
+			}
+
+			selector, err := metav1.LabelSelectorAsSelector(mc.set.Spec.Selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pods, err := om.podsLister.Pods(mc.set.Namespace).List(selector)
+			assert.Nil(t, err)
+			if len(pods) != len(mc.expectedPods) {
+				t.Fatalf("Failed to test %s, unexpected pods length, expected %v, got %v", mc.name, util.DumpJSON(mc.expectedPods), util.DumpJSON(pods))
+			}
+			for _, p := range mc.expectedPods {
+				p.APIVersion = "v1"
+				p.Kind = "Pod"
+
+				var gotPod *v1.Pod
+				if gotPod, err = om.podsLister.Pods(p.Namespace).Get(p.Name); err != nil {
+					t.Fatalf("Failed to test %s, get pod %s error: %v", mc.name, p.Name, err)
+				}
+				gotPod.APIVersion = "v1"
+				gotPod.Kind = "Pod"
+
+				if v, ok := gotPod.Annotations[appspub.LifecycleTimestampKey]; ok {
+					if p.Annotations == nil {
+						p.Annotations = map[string]string{}
+					}
+					p.Annotations[appspub.LifecycleTimestampKey] = v
+				}
+				p.ResourceVersion = gotPod.ResourceVersion
+
+				if !reflect.DeepEqual(gotPod, p) {
+					t.Fatalf("Failed to test %s, unexpected pod %s, expected \n%v\n got \n%v", mc.name, p.Name, util.DumpJSON(p), util.DumpJSON(gotPod))
+				}
+			}
+		})
 	}
 }
 
@@ -2883,6 +3837,7 @@ func TestStatefulSetControlRollback(t *testing.T) {
 }
 
 type requestTracker struct {
+	l        sync.Mutex
 	requests int
 	err      error
 	after    int
@@ -2893,10 +3848,14 @@ func (rt *requestTracker) errorReady() bool {
 }
 
 func (rt *requestTracker) inc() {
+	rt.l.Lock()
+	defer rt.l.Unlock()
 	rt.requests++
 }
 
 func (rt *requestTracker) reset() {
+	rt.l.Lock()
+	defer rt.l.Unlock()
 	rt.err = nil
 	rt.after = 0
 }
@@ -2904,6 +3863,7 @@ func (rt *requestTracker) reset() {
 type fakeObjectManager struct {
 	podsLister       corelisters.PodLister
 	claimsLister     corelisters.PersistentVolumeClaimLister
+	scLister         storagelisters.StorageClassLister
 	setsLister       kruiseappslisters.StatefulSetLister
 	podsIndexer      cache.Indexer
 	claimsIndexer    cache.Indexer
@@ -2919,18 +3879,20 @@ func newFakeObjectManager(informerFactory informers.SharedInformerFactory, kruis
 	claimInformer := informerFactory.Core().V1().PersistentVolumeClaims()
 	revisionInformer := informerFactory.Apps().V1().ControllerRevisions()
 	setInformer := kruiseInformerFactory.Apps().V1beta1().StatefulSets()
+	scInformer := informerFactory.Storage().V1().StorageClasses()
 
 	return &fakeObjectManager{
 		podInformer.Lister(),
 		claimInformer.Lister(),
+		scInformer.Lister(),
 		setInformer.Lister(),
 		podInformer.Informer().GetIndexer(),
 		claimInformer.Informer().GetIndexer(),
 		setInformer.Informer().GetIndexer(),
 		revisionInformer.Informer().GetIndexer(),
-		requestTracker{0, nil, 0},
-		requestTracker{0, nil, 0},
-		requestTracker{0, nil, 0}}
+		requestTracker{sync.Mutex{}, 0, nil, 0},
+		requestTracker{sync.Mutex{}, 0, nil, 0},
+		requestTracker{sync.Mutex{}, 0, nil, 0}}
 }
 
 func (om *fakeObjectManager) CreatePod(ctx context.Context, pod *v1.Pod) error {
@@ -2968,7 +3930,8 @@ func (om *fakeObjectManager) DeletePod(pod *v1.Pod) error {
 }
 
 func (om *fakeObjectManager) CreateClaim(claim *v1.PersistentVolumeClaim) error {
-	om.claimsIndexer.Update(claim)
+	claimClone := claim.DeepCopy()
+	om.claimsIndexer.Update(claimClone)
 	return nil
 }
 
@@ -2986,6 +3949,10 @@ func (om *fakeObjectManager) UpdateClaim(claim *v1.PersistentVolumeClaim) error 
 	}
 	om.claimsIndexer.Update(claim)
 	return nil
+}
+
+func (om *fakeObjectManager) GetStorageClass(scName string) (*storagev1.StorageClass, error) {
+	return om.scLister.Get(scName)
 }
 
 func (om *fakeObjectManager) SetCreateStatefulPodError(err error, after int) {
@@ -3107,6 +4074,21 @@ func (om *fakeObjectManager) setPodTerminated(set *appsv1beta1.StatefulSet, ordi
 	return om.podsLister.Pods(set.Namespace).List(selector)
 }
 
+func (om *fakeObjectManager) setPodSpecifiedDelete(set *appsv1beta1.StatefulSet, ordinal int) ([]*v1.Pod, error) {
+	pod := newStatefulSetPod(set, ordinal)
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[appsv1alpha1.SpecifiedDeleteKey] = "true"
+	fakeResourceVersion(pod)
+	om.podsIndexer.Update(pod)
+	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+	return om.podsLister.Pods(set.Namespace).List(selector)
+}
+
 var _ StatefulPodControlObjectManager = &fakeObjectManager{}
 
 type fakeStatefulSetStatusUpdater struct {
@@ -3119,7 +4101,7 @@ func newFakeStatefulSetStatusUpdater(setInformer kruiseappsinformers.StatefulSet
 	return &fakeStatefulSetStatusUpdater{
 		setInformer.Lister(),
 		setInformer.Informer().GetIndexer(),
-		requestTracker{0, nil, 0},
+		requestTracker{sync.Mutex{}, 0, nil, 0},
 	}
 }
 
@@ -3668,6 +4650,340 @@ func TestScaleUpWithMaxUnavailable(t *testing.T) {
 }
 
 func isOrHasInternalError(err error) bool {
-	agg, ok := err.(utilerrors.Aggregate)
+	var agg utilerrors.Aggregate
+	ok := errors.As(err, &agg)
 	return !ok && !apierrors.IsInternalError(err) || ok && len(agg.Errors()) > 0 && !apierrors.IsInternalError(agg.Errors()[0])
+}
+
+func emptyInvariants(set *appsv1beta1.StatefulSet, om *fakeObjectManager) error {
+	return nil
+}
+
+func TestStatefulSetControlWithStartOrdinal(t *testing.T) {
+	defer utilfeature.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetStartOrdinal, true)()
+
+	simpleSetFn := func(replicas, startOrdinal int, reservedIds ...int32) *appsv1beta1.StatefulSet {
+		statefulSet := newStatefulSet(replicas)
+		statefulSet.Spec.Ordinals = &appsv1beta1.StatefulSetOrdinals{Start: int32(startOrdinal)}
+		for _, id := range reservedIds {
+			statefulSet.Spec.ReserveOrdinals = append(statefulSet.Spec.ReserveOrdinals, intstr.FromInt32(id))
+		}
+		return statefulSet
+	}
+
+	testCases := []struct {
+		fn          func(*testing.T, *appsv1beta1.StatefulSet, invariantFunc, []int)
+		obj         func() *appsv1beta1.StatefulSet
+		expectedIds []int
+	}{
+		{
+			CreatesPodsWithStartOrdinal,
+			func() *appsv1beta1.StatefulSet {
+				return simpleSetFn(3, 2)
+			},
+			[]int{2, 3, 4},
+		},
+		{
+			CreatesPodsWithStartOrdinal,
+			func() *appsv1beta1.StatefulSet {
+				return simpleSetFn(3, 2, 0, 4)
+			},
+			[]int{2, 3, 5},
+		},
+		{
+			CreatesPodsWithStartOrdinal,
+			func() *appsv1beta1.StatefulSet {
+				return simpleSetFn(3, 2, 0, 2, 3, 4, 5)
+			},
+			[]int{6, 7, 8},
+		},
+		{
+			CreatesPodsWithStartOrdinal,
+			func() *appsv1beta1.StatefulSet {
+				return simpleSetFn(4, 1)
+			},
+			[]int{1, 2, 3, 4},
+		},
+		{
+			CreatesPodsWithStartOrdinal,
+			func() *appsv1beta1.StatefulSet {
+				return simpleSetFn(4, 1, 1, 3, 4)
+			},
+			[]int{2, 5, 6, 7},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testObj := testCase.obj
+		testFn := testCase.fn
+
+		set := testObj()
+		testFn(t, set, emptyInvariants, testCase.expectedIds)
+	}
+}
+
+func CreatesPodsWithStartOrdinal(t *testing.T, set *appsv1beta1.StatefulSet, invariants invariantFunc, expectedIds []int) {
+	client := fake.NewSimpleClientset()
+	kruiseClient := kruisefake.NewSimpleClientset(set)
+	om, _, ssc, stop := setupController(client, kruiseClient)
+	defer close(stop)
+
+	if err := scaleUpStatefulSetControl(set, ssc, om, invariants); err != nil {
+		t.Errorf("Failed to turn up StatefulSet : %s", err)
+	}
+	var err error
+	set, err = om.setsLister.StatefulSets(set.Namespace).Get(set.Name)
+	if err != nil {
+		t.Fatalf("Error getting updated StatefulSet: %v", err)
+	}
+	if set.Status.Replicas != *set.Spec.Replicas {
+		t.Errorf("Failed to scale statefulset to %d replicas", *set.Spec.Replicas)
+	}
+	if set.Status.ReadyReplicas != *set.Spec.Replicas {
+		t.Errorf("Failed to set ReadyReplicas correctly, expected %d", *set.Spec.Replicas)
+	}
+	if set.Status.UpdatedReplicas != *set.Spec.Replicas {
+		t.Errorf("Failed to set UpdatedReplicas correctly, expected %d", *set.Spec.Replicas)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
+	if err != nil {
+		t.Error(err)
+	}
+	pods, err := om.podsLister.Pods(set.Namespace).List(selector)
+	if err != nil {
+		t.Error(err)
+	}
+	sort.Sort(ascendingOrdinal(pods))
+	if len(expectedIds) != len(pods) {
+		t.Errorf("Expected %d pods. Got %d", len(expectedIds), len(pods))
+		return
+	}
+	for i, pod := range pods {
+		expectedOrdinal := expectedIds[i]
+		actualPodOrdinal := getOrdinal(pod)
+		if actualPodOrdinal != expectedOrdinal {
+			t.Errorf("Expected pod ordinal %d. Got %d", expectedOrdinal, actualPodOrdinal)
+		}
+	}
+}
+
+func newStatefulSetWithGivenSC(replicas int, vctNumber int, scs []*string) *appsv1beta1.StatefulSet {
+	petMounts := []corev1.VolumeMount{}
+	for i := 0; i < vctNumber; i++ {
+		petMounts = append(petMounts, corev1.VolumeMount{
+			Name: fmt.Sprintf("datadir-%d", i), MountPath: fmt.Sprintf("/tmp/vct-%d", i),
+		})
+	}
+	podMounts := []corev1.VolumeMount{
+		{Name: "home", MountPath: "/home"},
+	}
+	sts := newStatefulSetWithVolumes(replicas, "foo", petMounts, podMounts)
+	if len(sts.Spec.VolumeClaimTemplates) != vctNumber || len(scs) == 0 {
+		return sts
+	}
+	for i := 0; i < vctNumber; i++ {
+		sts.Spec.VolumeClaimTemplates[i].Spec.StorageClassName = scs[i%len(scs)]
+	}
+	return sts
+}
+
+func TestStatefulSetVCTResize(t *testing.T) {
+	//Q: Why this test can work without csi work?
+	//A: All pvcs are not ready. => All pods are unavailable. =>  All pods/pvcs can update.
+	defer utilfeature.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StatefulSetAutoResizePVCGate, true)()
+
+	sc1 := newStorageClass("can_expand", true)
+	sc2 := newStorageClass("cannot_expand", false)
+	simpleSetFn := func(scs []*string) *appsv1beta1.StatefulSet {
+		statefulSet := newStatefulSetWithGivenSC(5, len(scs), scs)
+		statefulSet.Spec.VolumeClaimUpdateStrategy.Type = appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType
+		return statefulSet
+	}
+	validationFn := func(set *appsv1beta1.StatefulSet, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) error {
+		for _, pvc := range pvcs {
+			if *pvc.Spec.StorageClassName == sc1.Name {
+				if !pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse("20")) {
+					return errors.New("pvc size is not updated")
+				}
+			} else if *pvc.Spec.StorageClassName == sc2.Name {
+				if !pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse("1")) {
+					return errors.New("pvc size is not updated")
+				}
+			}
+		}
+		return nil
+	}
+	type testCase struct {
+		name       string
+		invariants func(set *appsv1beta1.StatefulSet, om *fakeObjectManager) error
+		initial    func() *appsv1beta1.StatefulSet
+		update     func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet
+		canUpdate  bool
+		validate   func(set *appsv1beta1.StatefulSet, pods []*v1.Pod, pvcs []*v1.PersistentVolumeClaim) error
+	}
+	testFn := func(test *testCase, t *testing.T) {
+		set := test.initial()
+		client := fake.NewSimpleClientset(&sc1, &sc2)
+		kruiseClient := kruisefake.NewSimpleClientset(set)
+		om, _, ssc, stop := setupController(client, kruiseClient)
+		defer close(stop)
+		if err := scaleUpStatefulSetControl(set, ssc, om, test.invariants); err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+		set, err := om.setsLister.StatefulSets(set.Namespace).Get(set.Name)
+		if err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+		set = test.update(set)
+		if err := updateStatefulSetControl(set, ssc, om, assertUpdateInvariants); (err == nil) != test.canUpdate {
+			t.Fatalf("%s expected can update %v: %v", test.name, test.canUpdate, err)
+		}
+		selector, err := metav1.LabelSelectorAsSelector(set.Spec.Selector)
+		if err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+		pods, err := om.podsLister.Pods(set.Namespace).List(selector)
+		if err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+
+		pvcs, err := om.claimsLister.PersistentVolumeClaims(set.Namespace).List(selector)
+		if err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+
+		set, err = om.setsLister.StatefulSets(set.Namespace).Get(set.Name)
+		if err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+		if test.canUpdate {
+			if err := test.validate(set, pods, pvcs); err != nil {
+				t.Fatalf("%s: %s", test.name, err)
+			}
+		}
+	}
+
+	testCases := []testCase{
+		{
+			name:       "expand_vct_with_sc_can_expand",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc1.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: true,
+			validate:  validationFn,
+		},
+		{
+			name:       "expand_sts_with_vct_cannot_expand",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc2.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: false,
+			validate:  validationFn,
+		},
+		{
+			name:       "expand_vct_with_2sc_can_expand",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc1.Name, &sc1.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				set.Spec.VolumeClaimTemplates[1].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: true,
+			validate:  validationFn,
+		},
+		{
+			name:       "expand_vct_with_sc_cannot_expand",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc2.Name, &sc2.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: false,
+			validate:  validationFn,
+		},
+		{
+			name:       "expand_vct_with_2sc_mixed_expand",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc1.Name, &sc2.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				set.Spec.VolumeClaimTemplates[1].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: false,
+			validate:  validationFn,
+		},
+		{
+			name:       "expand_vct_with_2sc_mixed_expand2",
+			invariants: emptyInvariants,
+			initial: func() *appsv1beta1.StatefulSet {
+				return simpleSetFn([]*string{&sc1.Name, &sc2.Name})
+			},
+			update: func(set *appsv1beta1.StatefulSet) *appsv1beta1.StatefulSet {
+				set.Spec.Template.Spec.Containers[0].Image = "busybox"
+				set.Spec.VolumeClaimTemplates[0].Spec.Resources = corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: *resource.NewQuantity(20, resource.BinarySI),
+					},
+				}
+				return set
+			},
+			canUpdate: true,
+			validate:  validationFn,
+		},
+	}
+	for _, c := range testCases {
+		testFn(&c, t)
+	}
 }

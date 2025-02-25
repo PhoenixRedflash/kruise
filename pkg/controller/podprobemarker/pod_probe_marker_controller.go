@@ -18,6 +18,7 @@ package podprobemarker
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"reflect"
@@ -25,8 +26,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
@@ -60,6 +64,8 @@ var (
 const (
 	// PodProbeMarkerFinalizer is on PodProbeMarker, and used to remove podProbe from NodePodProbe.Spec
 	PodProbeMarkerFinalizer = "kruise.io/node-pod-probe-cleanup"
+
+	VirtualKubelet = "virtual-kubelet"
 )
 
 /**
@@ -97,11 +103,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// watch for changes to PodProbeMarker
-	if err = c.Watch(&source.Kind{Type: &appsv1alpha1.PodProbeMarker{}}, &enqueueRequestForPodProbeMarker{}); err != nil {
+	if err = c.Watch(source.Kind(mgr.GetCache(), &appsv1alpha1.PodProbeMarker{}, &enqueueRequestForPodProbeMarker{})); err != nil {
 		return err
 	}
 	// watch for changes to pod
-	if err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &enqueueRequestForPod{reader: mgr.GetClient()}); err != nil {
+	if err = c.Watch(source.Kind(mgr.GetCache(), &corev1.Pod{}, &enqueueRequestForPod{reader: mgr.GetClient()})); err != nil {
 		return err
 	}
 
@@ -145,28 +151,45 @@ func (r *ReconcilePodProbeMarker) syncPodProbeMarker(ns, name string) error {
 		// Error reading the object - requeue the request.
 		return err
 	}
-	pods, err := r.getMatchingPods(ppm)
+	normalPods, serverlessPods, err := r.getMatchingPods(ppm)
 	if err != nil {
-		klog.Errorf("PodProbeMarker ppm(%s/%s) list pods failed: %s", ppm.Namespace, ppm.Name, err.Error())
+		klog.ErrorS(err, "PodProbeMarker listed pods failed", "podProbeMarker", klog.KObj(ppm))
 		return err
 	}
 	// remove podProbe from NodePodProbe.Spec
 	if !ppm.DeletionTimestamp.IsZero() {
-		return r.handlerPodProbeMarkerFinalizer(ppm, pods)
+		return r.handlerPodProbeMarkerFinalizer(ppm, normalPods)
 	}
 	// add finalizer
 	if !controllerutil.ContainsFinalizer(ppm, PodProbeMarkerFinalizer) {
 		err = util.UpdateFinalizer(r.Client, ppm, util.AddFinalizerOpType, PodProbeMarkerFinalizer)
 		if err != nil {
-			klog.Errorf("add PodProbeMarker(%s/%s) finalizer failed: %s", ppm.Namespace, ppm.Name, err.Error())
+			klog.ErrorS(err, "Failed to add PodProbeMarker finalizer", "podProbeMarker", klog.KObj(ppm))
 			return err
 		}
-		klog.V(3).Infof("add PodProbeMarker(%s/%s) finalizer success", ppm.Namespace, ppm.Name)
+		klog.V(3).InfoS("Added PodProbeMarker finalizer success", "podProbeMarker", klog.KObj(ppm))
+	}
+
+	// map[probe.PodConditionType] = probe.MarkerPolicy
+	markers := make(map[string][]appsv1alpha1.ProbeMarkerPolicy)
+	for _, probe := range ppm.Spec.Probes {
+		if probe.PodConditionType == "" || len(probe.MarkerPolicy) == 0 {
+			continue
+		}
+		markers[probe.PodConditionType] = probe.MarkerPolicy
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.EnablePodProbeMarkerOnServerless) && len(markers) != 0 {
+		for _, pod := range serverlessPods {
+			if err = r.markServerlessPod(pod, markers); err != nil {
+				klog.ErrorS(err, "Failed to marker serverless pod", "podProbeMarker", klog.KObj(ppm), "pod", klog.KObj(pod))
+				return err
+			}
+		}
 	}
 
 	groupByNode := make(map[string][]*corev1.Pod)
-	for i, pod := range pods {
-		groupByNode[pod.Spec.NodeName] = append(groupByNode[pod.Spec.NodeName], pods[i])
+	for i, pod := range normalPods {
+		groupByNode[pod.Spec.NodeName] = append(groupByNode[pod.Spec.NodeName], normalPods[i])
 	}
 
 	// add podProbe in NodePodProbe
@@ -180,19 +203,20 @@ func (r *ReconcilePodProbeMarker) syncPodProbeMarker(ns, name string) error {
 	ppmClone := ppm.DeepCopy()
 	if err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Client.Get(context.TODO(), client.ObjectKey{Namespace: ppm.Namespace, Name: ppm.Name}, ppmClone); err != nil {
-			klog.Errorf("error getting updated podProbeMarker %s from client", ppm.Name)
+			klog.ErrorS(err, "Failed to get updated PodProbeMarker from client", "podProbeMarker", klog.KObj(ppm))
 		}
-		if ppmClone.Status.ObservedGeneration == ppmClone.Generation && int(ppmClone.Status.MatchedPods) == len(pods) {
+		matchedPods := len(normalPods) + len(serverlessPods)
+		if ppmClone.Status.ObservedGeneration == ppmClone.Generation && int(ppmClone.Status.MatchedPods) == matchedPods {
 			return nil
 		}
 		ppmClone.Status.ObservedGeneration = ppmClone.Generation
-		ppmClone.Status.MatchedPods = int64(len(pods))
+		ppmClone.Status.MatchedPods = int64(matchedPods)
 		return r.Client.Status().Update(context.TODO(), ppmClone)
 	}); err != nil {
-		klog.Errorf("PodProbeMarker(%s/%s) update status failed: %s", ppm.Namespace, ppm.Name, err.Error())
+		klog.ErrorS(err, "PodProbeMarker update status failed", "podProbeMarker", klog.KObj(ppm))
 		return err
 	}
-	klog.V(3).Infof("PodProbeMarker(%s/%s) update status(%s) success", ppm.Namespace, ppm.Name, util.DumpJSON(ppmClone.Status))
+	klog.V(3).InfoS("PodProbeMarker update status success", "podProbeMarker", klog.KObj(ppm), "status", util.DumpJSON(ppmClone.Status))
 	return nil
 }
 
@@ -207,10 +231,63 @@ func (r *ReconcilePodProbeMarker) handlerPodProbeMarkerFinalizer(ppm *appsv1alph
 	}
 	err := util.UpdateFinalizer(r.Client, ppm, util.RemoveFinalizerOpType, PodProbeMarkerFinalizer)
 	if err != nil {
-		klog.Errorf("remove PodProbeMarker(%s/%s) finalizer failed: %s", ppm.Namespace, ppm.Name, err.Error())
+		klog.ErrorS(err, "Failed to remove PodProbeMarker finalizer", "podProbeMarker", klog.KObj(ppm))
 		return err
 	}
-	klog.V(3).Infof("remove PodProbeMarker(%s/%s) finalizer success", ppm.Namespace, ppm.Name)
+	klog.V(3).InfoS("Removed PodProbeMarker finalizer success", "podProbeMarker", klog.KObj(ppm))
+	return nil
+}
+
+// marker labels or annotations on Pod based on probing results
+// markers is map[probe.PodConditionType] = probe.MarkerPolicy
+func (r *ReconcilePodProbeMarker) markServerlessPod(pod *corev1.Pod, markers map[string][]appsv1alpha1.ProbeMarkerPolicy) error {
+	newObjectMeta := *pod.ObjectMeta.DeepCopy()
+	if newObjectMeta.Annotations == nil {
+		newObjectMeta.Annotations = make(map[string]string)
+	}
+	if newObjectMeta.Labels == nil {
+		newObjectMeta.Labels = make(map[string]string)
+	}
+
+	for cond, policy := range markers {
+		condition := util.GetCondition(pod, corev1.PodConditionType(cond))
+		if condition == nil {
+			continue
+		}
+
+		for _, obj := range policy {
+			if !obj.State.IsEqualPodConditionStatus(condition.Status) {
+				continue
+			}
+			for k, v := range obj.Annotations {
+				newObjectMeta.Annotations[k] = v
+			}
+			for k, v := range obj.Labels {
+				newObjectMeta.Labels[k] = v
+			}
+		}
+	}
+
+	// no change
+	if reflect.DeepEqual(pod.ObjectMeta, newObjectMeta) {
+		return nil
+	}
+
+	// patch change
+	oldBytes, _ := json.Marshal(corev1.Pod{ObjectMeta: pod.ObjectMeta})
+	newBytes, _ := json.Marshal(corev1.Pod{ObjectMeta: newObjectMeta})
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldBytes, newBytes, &corev1.Pod{})
+	if err != nil {
+		return err
+	}
+	obj := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name}}
+	if err = r.Patch(context.TODO(), obj, client.RawPatch(types.StrategicMergePatchType, patchBytes)); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	klog.V(3).InfoS("PodProbeMarker marker pod success", "pod", klog.KObj(pod), "patch", string(patchBytes))
 	return nil
 }
 
@@ -219,11 +296,11 @@ func (r *ReconcilePodProbeMarker) updateNodePodProbes(ppm *appsv1alpha1.PodProbe
 	err := r.Get(context.TODO(), client.ObjectKey{Name: nodeName}, npp)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			klog.Warningf("PodProbeMarker ppm(%s/%s) NodePodProbe(%s) is Not Found", ppm.Namespace, ppm.Name, npp.Name)
+			klog.InfoS("PodProbeMarker NodePodProbe was Not Found", "podProbeMarker", klog.KObj(ppm), "nodePodProbe", klog.KObj(npp))
 			return nil
 		}
 		// Error reading the object - requeue the request.
-		klog.Errorf("PodProbeMarker ppm(%s/%s) get NodePodProbe(%s) failed: %s", ppm.Namespace, ppm.Name, nodeName, err.Error())
+		klog.ErrorS(err, "PodProbeMarker got NodePodProbe failed", "podProbeMarker", klog.KObj(ppm), "nodePodProbe", klog.KObj(npp))
 		return err
 	}
 
@@ -242,14 +319,14 @@ func (r *ReconcilePodProbeMarker) updateNodePodProbes(ppm *appsv1alpha1.PodProbe
 					if probe.Probe.TCPSocket != nil {
 						probe, err = convertTcpSocketProbeCheckPort(probe, pod)
 						if err != nil {
-							klog.Errorf("Failed to convert tcpSocket probe port, err: %v, pod: %v/%v", err, pod.Namespace, pod.Name)
+							klog.ErrorS(err, "Failed to convert tcpSocket probe port", "pod", klog.KObj(pod))
 							continue
 						}
 					}
 					if probe.Probe.HTTPGet != nil {
 						probe, err = convertHttpGetProbeCheckPort(probe, pod)
 						if err != nil {
-							klog.Errorf("Failed to convert httpGet probe port, err: %v, pod: %v/%v", err, pod.Namespace, pod.Name)
+							klog.ErrorS(err, "Failed to convert httpGet probe port", "pod", klog.KObj(pod))
 							continue
 						}
 					}
@@ -266,14 +343,14 @@ func (r *ReconcilePodProbeMarker) updateNodePodProbes(ppm *appsv1alpha1.PodProbe
 				if probe.Probe.TCPSocket != nil {
 					probe, err = convertTcpSocketProbeCheckPort(probe, pod)
 					if err != nil {
-						klog.Errorf("Failed to convert tcpSocket probe port, err: %v, pod: %v/%v", err, pod.Namespace, pod.Name)
+						klog.ErrorS(err, "Failed to convert tcpSocket probe port", "pod", klog.KObj(pod))
 						continue
 					}
 				}
 				if probe.Probe.HTTPGet != nil {
 					probe, err = convertHttpGetProbeCheckPort(probe, pod)
 					if err != nil {
-						klog.Errorf("Failed to convert httpGet probe port, err: %v, pod: %v/%v", err, pod.Namespace, pod.Name)
+						klog.ErrorS(err, "Failed to convert httpGet probe port", "pod", klog.KObj(pod))
 						continue
 					}
 				}
@@ -292,11 +369,11 @@ func (r *ReconcilePodProbeMarker) updateNodePodProbes(ppm *appsv1alpha1.PodProbe
 	}
 	err = r.Update(context.TODO(), npp)
 	if err != nil {
-		klog.Errorf("PodProbeMarker ppm(%s/%s) Update NodePodProbe(%s) failed: %s", ppm.Namespace, ppm.Name, npp.Name, err.Error())
+		klog.ErrorS(err, "PodProbeMarker updated NodePodProbe failed", "podProbeMarker", klog.KObj(ppm), "nodePodProbeName", npp.Name)
 		return err
 	}
-	klog.V(3).Infof("PodProbeMarker ppm(%s/%s) update NodePodProbe(%s) from(%s) -> to(%s) success",
-		ppm.Namespace, ppm.Name, npp.Name, util.DumpJSON(oldSpec), util.DumpJSON(npp.Spec))
+	klog.V(3).InfoS("PodProbeMarker updated NodePodProbe success", "podProbeMarker", klog.KObj(ppm), "nodePodProbeName", npp.Name,
+		"oldSpec", util.DumpJSON(oldSpec), "newSpec", util.DumpJSON(npp.Spec))
 	return nil
 }
 
@@ -355,28 +432,50 @@ func setPodContainerProbes(podProbe *appsv1alpha1.PodProbe, probe appsv1alpha1.P
 }
 
 // If you need update the pod object, you must DeepCopy it
-func (r *ReconcilePodProbeMarker) getMatchingPods(ppm *appsv1alpha1.PodProbeMarker) ([]*corev1.Pod, error) {
+// para1: normal pods, which is on normal node
+// para2: serverless pods
+func (r *ReconcilePodProbeMarker) getMatchingPods(ppm *appsv1alpha1.PodProbeMarker) ([]*corev1.Pod, []*corev1.Pod, error) {
 	// get more faster selector
 	selector, err := util.ValidatedLabelSelectorAsSelector(ppm.Spec.Selector)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// DisableDeepCopy:true, indicates must be deep copy before update pod objection
 	listOpts := &client.ListOptions{LabelSelector: selector, Namespace: ppm.Namespace}
 	podList := &corev1.PodList{}
 	if listErr := r.Client.List(context.TODO(), podList, listOpts, utilclient.DisableDeepCopy); listErr != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	pods := make([]*corev1.Pod, 0, len(podList.Items))
+	normalPods := make([]*corev1.Pod, 0, len(podList.Items))
+	serverlessPods := make([]*corev1.Pod, 0, len(podList.Items))
+	nodes := map[string]*corev1.Node{}
 	for i := range podList.Items {
 		pod := &podList.Items[i]
 		condition := util.GetCondition(pod, corev1.PodInitialized)
-		if kubecontroller.IsPodActive(pod) && pod.Spec.NodeName != "" &&
-			condition != nil && condition.Status == corev1.ConditionTrue {
-			pods = append(pods, pod)
+		if !kubecontroller.IsPodActive(pod) || condition == nil ||
+			condition.Status != corev1.ConditionTrue || pod.Spec.NodeName == "" {
+			continue
+		}
+
+		node, ok := nodes[pod.Spec.NodeName]
+		if !ok {
+			node = &corev1.Node{}
+			if err = r.Get(context.TODO(), client.ObjectKey{Name: pod.Spec.NodeName}, node); err != nil {
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return nil, nil, err
+			}
+			nodes[node.Name] = node
+		}
+
+		if node.Labels["type"] == VirtualKubelet {
+			serverlessPods = append(serverlessPods, pod)
+		} else {
+			normalPods = append(normalPods, pod)
 		}
 	}
-	return pods, nil
+	return normalPods, serverlessPods, nil
 }
 
 func (r *ReconcilePodProbeMarker) removePodProbeFromNodePodProbe(ppmName, nppName string) error {
@@ -409,9 +508,9 @@ func (r *ReconcilePodProbeMarker) removePodProbeFromNodePodProbe(ppmName, nppNam
 	npp.Spec = newSpec
 	err = r.Update(context.TODO(), npp)
 	if err != nil {
-		klog.Errorf("NodePodProbe(%s) remove PodProbe(%s) failed: %s", nppName, ppmName, err.Error())
+		klog.ErrorS(err, "NodePodProbe removed PodProbeMarker failed", "nodePodProbeName", nppName, "podProbeMarkerName", ppmName)
 		return err
 	}
-	klog.V(3).Infof("NodePodProbe(%s) remove PodProbe(%s) success", nppName, ppmName)
+	klog.V(3).InfoS("NodePodProbe removed PodProbeMarker success", "nodePodProbeName", nppName, "podProbeMarkerName", ppmName)
 	return nil
 }

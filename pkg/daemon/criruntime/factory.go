@@ -23,13 +23,15 @@ import (
 	"os"
 	"time"
 
-	runtimeimage "github.com/openkruise/kruise/pkg/daemon/criruntime/imageruntime"
-	daemonutil "github.com/openkruise/kruise/pkg/daemon/util"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	criapi "k8s.io/cri-api/pkg/apis"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
 	criremote "k8s.io/kubernetes/pkg/kubelet/cri/remote"
 	kubeletutil "k8s.io/kubernetes/pkg/kubelet/util"
+
+	runtimeimage "github.com/openkruise/kruise/pkg/daemon/criruntime/imageruntime"
+	daemonutil "github.com/openkruise/kruise/pkg/daemon/util"
 )
 
 const (
@@ -50,9 +52,7 @@ type Factory interface {
 type ContainerRuntimeType string
 
 const (
-	ContainerRuntimeDocker     = "docker"
 	ContainerRuntimeContainerd = "containerd"
-	ContainerRuntimePouch      = "pouch"
 	ContainerRuntimeCommonCRI  = "common-cri"
 )
 
@@ -89,43 +89,34 @@ func NewFactory(varRunPath string, accountManager daemonutil.ImagePullAccountMan
 		var runtimeService criapi.RuntimeService
 		var typedVersion *runtimeapi.VersionResponse
 
-		switch cfg.runtimeType {
-		case ContainerRuntimeContainerd, ContainerRuntimeCommonCRI, ContainerRuntimePouch:
-			addr, _, err := kubeletutil.GetAddressAndDialer(cfg.runtimeRemoteURI)
-			if err != nil {
-				klog.Warningf("Failed to get address for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
-				continue
-			}
-			imageService, err = runtimeimage.NewCRIImageService(addr, accountManager)
-			if err != nil {
-				klog.Warningf("Failed to new image service for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
-				continue
-			}
-		case ContainerRuntimeDocker:
-			imageService, err = runtimeimage.NewDockerImageService(cfg.runtimeURI, accountManager)
-			if err != nil {
-				klog.Warningf("Failed to new image service for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
-				continue
-			}
+		addr, _, err := kubeletutil.GetAddressAndDialer(cfg.runtimeRemoteURI)
+		if err != nil {
+			klog.ErrorS(err, "Failed to get address", "runtimeType", cfg.runtimeType, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
+			continue
+		}
+		imageService, err = runtimeimage.NewCRIImageService(addr, accountManager)
+		if err != nil {
+			klog.ErrorS(err, "Failed to new image service", "runtimeType", cfg.runtimeType, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
+			continue
 		}
 
 		if _, err = imageService.ListImages(context.TODO()); err != nil {
-			klog.Warningf("Failed to list images for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
+			klog.ErrorS(err, "Failed to list images", "runtimeType", cfg.runtimeType, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
 			continue
 		}
 
-		runtimeService, err = criremote.NewRemoteRuntimeService(cfg.runtimeRemoteURI, time.Second*5)
+		runtimeService, err = criremote.NewRemoteRuntimeService(cfg.runtimeRemoteURI, time.Second*5, oteltrace.NewNoopTracerProvider())
 		if err != nil {
-			klog.Warningf("Failed to new runtime service for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
+			klog.ErrorS(err, "Failed to new runtime service", "runtimeType", cfg.runtimeType, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
 			continue
 		}
-		typedVersion, err = runtimeService.Version(kubeRuntimeAPIVersion)
+		typedVersion, err = runtimeService.Version(context.TODO(), kubeRuntimeAPIVersion)
 		if err != nil {
-			klog.Warningf("Failed to get runtime typed version for %v (%s, %s): %v", cfg.runtimeType, cfg.runtimeURI, cfg.runtimeRemoteURI, err)
+			klog.ErrorS(err, "Failed to get runtime typed version", "runtimeType", cfg.runtimeType, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
 			continue
 		}
 
-		klog.V(2).Infof("Add runtime impl %v, URI: (%s, %s)", typedVersion.RuntimeName, cfg.runtimeURI, cfg.runtimeRemoteURI)
+		klog.V(2).InfoS("Add runtime", "runtimeName", typedVersion.RuntimeName, "runtimeURI", cfg.runtimeURI, "runtimeRemoteURI", cfg.runtimeRemoteURI)
 		f.impls = append(f.impls, &runtimeImpl{
 			cfg:            cfg,
 			runtimeName:    typedVersion.RuntimeName,
@@ -168,48 +159,14 @@ func detectRuntime(varRunPath string) (cfgs []runtimeConfig) {
 				runtimeType:      ContainerRuntimeCommonCRI,
 				runtimeRemoteURI: fmt.Sprintf("unix://%s/%s", varRunPath, *CRISocketFileName),
 			})
-			klog.Infof("Find configured CRI socket %s with given flag", filePath)
+			klog.InfoS("Find configured CRI socket with given flag", "filePath", filePath)
 		} else {
-			klog.Errorf("Failed to stat the CRI socket %s with given flag: %v", filePath, err)
+			klog.ErrorS(err, "Failed to stat the CRI socket with given flag", "filePath", filePath)
 		}
 		return
 	}
 
 	// if the flag is not set, then try to find runtime in the recognized types and paths.
-
-	// pouch
-	{
-		_, err1 := os.Stat(fmt.Sprintf("%s/pouchd.sock", varRunPath))
-		_, err2 := os.Stat(fmt.Sprintf("%s/pouchcri.sock", varRunPath))
-		if err1 == nil && err2 == nil {
-			cfgs = append(cfgs, runtimeConfig{
-				runtimeType:      ContainerRuntimePouch,
-				runtimeURI:       fmt.Sprintf("unix://%s/pouchd.sock", varRunPath),
-				runtimeRemoteURI: fmt.Sprintf("unix://%s/pouchcri.sock", varRunPath),
-			})
-		} else if err1 == nil && err2 != nil {
-			klog.Errorf("%s/pouchd.sock exists, but not found %s/pouchcri.sock", varRunPath, varRunPath)
-		} else if err1 != nil && err2 == nil {
-			klog.Errorf("%s/pouchdcri.sock exists, but not found %s/pouchd.sock", varRunPath, varRunPath)
-		}
-	}
-
-	// docker
-	{
-		_, err1 := os.Stat(fmt.Sprintf("%s/docker.sock", varRunPath))
-		_, err2 := os.Stat(fmt.Sprintf("%s/dockershim.sock", varRunPath))
-		if err1 == nil && err2 == nil {
-			cfgs = append(cfgs, runtimeConfig{
-				runtimeType:      ContainerRuntimeDocker,
-				runtimeURI:       fmt.Sprintf("unix://%s/docker.sock", varRunPath),
-				runtimeRemoteURI: fmt.Sprintf("unix://%s/dockershim.sock", varRunPath),
-			})
-		} else if err1 == nil && err2 != nil {
-			klog.Errorf("%s/docker.sock exists, but not found %s/dockershim.sock", varRunPath, varRunPath)
-		} else if err1 != nil && err2 == nil {
-			klog.Errorf("%s/dockershim.sock exists, but not found %s/docker.sock", varRunPath, varRunPath)
-		}
-	}
 
 	// containerd, with the same behavior of pullImage as commonCRI
 	{
@@ -239,6 +196,24 @@ func detectRuntime(varRunPath string) (cfgs []runtimeConfig) {
 			cfgs = append(cfgs, runtimeConfig{
 				runtimeType:      ContainerRuntimeCommonCRI,
 				runtimeRemoteURI: fmt.Sprintf("unix://%s/crio/crio.sock", varRunPath),
+			})
+		}
+	}
+
+	// cri-docker dockerd as a compliant Container Runtime Interface, detail see https://github.com/Mirantis/cri-dockerd
+	{
+		if _, err = os.Stat(fmt.Sprintf("%s/cri-dockerd.sock", varRunPath)); err == nil {
+			cfgs = append(cfgs, runtimeConfig{
+				runtimeType:      ContainerRuntimeCommonCRI,
+				runtimeRemoteURI: fmt.Sprintf("unix://%s/cri-dockerd.sock", varRunPath),
+			})
+		}
+		// Check if the cri-dockerd runtime socket exists in the expected k3s runtime directory.
+		// If found, append it to the runtime configuration list to ensure k3s can use cri-dockerd.
+		if _, err = os.Stat(fmt.Sprintf("%s/cri-dockerd/cri-dockerd.sock", varRunPath)); err == nil {
+			cfgs = append(cfgs, runtimeConfig{
+				runtimeType:      ContainerRuntimeCommonCRI,
+				runtimeRemoteURI: fmt.Sprintf("unix://%s/cri-dockerd/cri-dockerd.sock", varRunPath),
 			})
 		}
 	}

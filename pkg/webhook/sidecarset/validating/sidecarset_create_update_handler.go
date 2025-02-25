@@ -28,6 +28,7 @@ import (
 	"github.com/openkruise/kruise/pkg/control/sidecarcontrol"
 	"github.com/openkruise/kruise/pkg/util"
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
@@ -43,7 +44,6 @@ import (
 	corevalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/fieldpath"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -71,10 +71,10 @@ type SidecarSetCreateUpdateHandler struct {
 	Client client.Client
 
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
-func (h *SidecarSetCreateUpdateHandler) validatingSidecarSetFn(ctx context.Context, obj *appsv1alpha1.SidecarSet, older *appsv1alpha1.SidecarSet) (bool, string, error) {
+func (h *SidecarSetCreateUpdateHandler) validatingSidecarSetFn(_ context.Context, obj *appsv1alpha1.SidecarSet, older *appsv1alpha1.SidecarSet) (bool, string, error) {
 	allErrs := h.validateSidecarSet(obj, older)
 	if len(allErrs) != 0 {
 		return false, "", allErrs.ToAggregate()
@@ -91,6 +91,9 @@ func (h *SidecarSetCreateUpdateHandler) validateSidecarSet(obj *appsv1alpha1.Sid
 	if older != nil {
 		allErrs = append(allErrs, validateSidecarContainerConflict(obj.Spec.Containers, older.Spec.Containers, field.NewPath("spec.containers"))...)
 	}
+	if len(allErrs) != 0 {
+		return allErrs
+	}
 	// iterate across all containers in other sidecarsets to avoid duplication of name
 	sidecarSets := &appsv1alpha1.SidecarSetList{}
 	if err := h.Client.List(context.TODO(), sidecarSets, &client.ListOptions{}); err != nil {
@@ -100,7 +103,7 @@ func (h *SidecarSetCreateUpdateHandler) validateSidecarSet(obj *appsv1alpha1.Sid
 	return allErrs
 }
 
-func validateSidecarSetName(name string, prefix bool) (allErrs []string) {
+func validateSidecarSetName(name string, _ bool) (allErrs []string) {
 	if !validateSidecarSetNameRegex.MatchString(name) {
 		allErrs = append(allErrs, validationutil.RegexError(validateSidecarSetNameMsg, validSidecarSetNameFmt, "example-com"))
 	}
@@ -113,6 +116,12 @@ func validateSidecarSetName(name string, prefix bool) (allErrs []string) {
 func (h *SidecarSetCreateUpdateHandler) validateSidecarSetSpec(obj *appsv1alpha1.SidecarSet, fldPath *field.Path) field.ErrorList {
 	spec := &obj.Spec
 	allErrs := field.ErrorList{}
+	// currently when initContainer restartPolicy = Always, kruise don't support in-place update
+	for _, c := range obj.Spec.InitContainers {
+		if sidecarcontrol.IsSidecarContainer(c.Container) && obj.Spec.UpdateStrategy.Type == appsv1alpha1.RollingUpdateSidecarSetStrategyType {
+			allErrs = append(allErrs, field.Required(fldPath.Child("updateStrategy"), "The initContainer in-place upgrade is not currently supported."))
+		}
+	}
 
 	//validate spec selector
 	if spec.Selector == nil {
@@ -168,7 +177,8 @@ func (h *SidecarSetCreateUpdateHandler) validateSidecarSetSpec(obj *appsv1alpha1
 
 func validateSelector(selector *metav1.LabelSelector, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, metavalidation.ValidateLabelSelector(selector, fldPath)...)
+	allErrs = append(allErrs, metavalidation.ValidateLabelSelector(selector,
+		metavalidation.LabelSelectorValidationOptions{}, fldPath)...)
 	if len(selector.MatchLabels)+len(selector.MatchExpressions) == 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath, selector, "empty selector is not valid for sidecarset."))
 	}
@@ -179,7 +189,7 @@ func validateSelector(selector *metav1.LabelSelector, fldPath *field.Path) field
 	return allErrs
 }
 
-func (h *SidecarSetCreateUpdateHandler) validateSidecarSetInjectionStrategy(obj *appsv1alpha1.SidecarSet, fldPath *field.Path) field.ErrorList {
+func (h *SidecarSetCreateUpdateHandler) validateSidecarSetInjectionStrategy(obj *appsv1alpha1.SidecarSet, _ *field.Path) field.ErrorList {
 	errList := field.ErrorList{}
 	revisionInfo := obj.Spec.InjectionStrategy.Revision
 
@@ -195,19 +205,33 @@ func (h *SidecarSetCreateUpdateHandler) validateSidecarSetInjectionStrategy(obj 
 		}
 
 		switch revisionInfo.Policy {
-		case "", appsv1alpha1.AlwaysSidecarSetInjectRevisionPolicy:
+		case "", appsv1alpha1.AlwaysSidecarSetInjectRevisionPolicy, appsv1alpha1.PartialSidecarSetInjectRevisionPolicy:
 		default:
-			errList = append(errList, field.Invalid(field.NewPath("revision").Child("policy"), revisionInfo, fmt.Sprintf("Invalid policy %v, only support 'Always' currently", revisionInfo.Policy)))
+			errList = append(errList, field.Invalid(field.NewPath("revision").Child("policy"), revisionInfo, fmt.Sprintf("Invalid policy %v, supported: [%s, %s]",
+				revisionInfo.Policy, appsv1alpha1.AlwaysSidecarSetInjectRevisionPolicy, appsv1alpha1.PartialSidecarSetInjectRevisionPolicy)))
 		}
-
 	}
 	return errList
+}
+
+// intStrIsSet returns true when the intstr is not nil and not the default 0 value.
+func intStrIsSet(i *intstr.IntOrString) bool {
+	if i == nil {
+		return false
+	}
+	if i.Type == intstr.String {
+		return true
+	}
+	return i.IntVal != 0
 }
 
 func validateSidecarSetUpdateStrategy(strategy *appsv1alpha1.SidecarSetUpdateStrategy, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	// if SidecarSet update strategy is RollingUpdate
 	if strategy.Type == appsv1alpha1.RollingUpdateSidecarSetStrategyType {
+		if intStrIsSet(strategy.Partition) && strategy.Selector != nil {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("updateStrategy"), fmt.Sprintf("%++v", strategy), "Partition and Selector cannot be used together"))
+		}
 		if strategy.Selector != nil {
 			allErrs = append(allErrs, validateSelector(strategy.Selector, fldPath.Child("selector"))...)
 		}
@@ -490,20 +514,4 @@ func (h *SidecarSetCreateUpdateHandler) Handle(ctx context.Context, req admissio
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	return admission.ValidationResponse(allowed, reason)
-}
-
-var _ inject.Client = &SidecarSetCreateUpdateHandler{}
-
-// InjectClient injects the client into the SidecarSetCreateUpdateHandler
-func (h *SidecarSetCreateUpdateHandler) InjectClient(c client.Client) error {
-	h.Client = c
-	return nil
-}
-
-var _ admission.DecoderInjector = &SidecarSetCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the SidecarSetCreateUpdateHandler
-func (h *SidecarSetCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
 }

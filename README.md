@@ -3,10 +3,11 @@
 [![License](https://img.shields.io/badge/license-Apache%202-4EB1BA.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
 [![Go Report Card](https://goreportcard.com/badge/github.com/openkruise/kruise)](https://goreportcard.com/report/github.com/openkruise/kruise)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/2908/badge)](https://bestpractices.coreinfrastructure.org/en/projects/2908)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/openkruise/kruise/badge)](https://api.securityscorecards.dev/projects/github.com/openkruise/kruise)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/openkruise/kruise/badge)](https://scorecard.dev/viewer/?uri=github.com/openkruise/kruise)
 [![CircleCI](https://circleci.com/gh/openkruise/kruise.svg?style=svg)](https://circleci.com/gh/openkruise/kruise)
 [![codecov](https://codecov.io/gh/openkruise/kruise/branch/master/graph/badge.svg)](https://codecov.io/gh/openkruise/kruise)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v2.0%20adopted-ff69b4.svg)](./CODE_OF_CONDUCT.md)
+[![Gurubase](https://img.shields.io/badge/Gurubase-Ask%20Kruise%20Guru-006BFF)](https://gurubase.io/g/kruise)
 
 English | [简体中文](./README-zh_CN.md)
 
@@ -67,6 +68,14 @@ You can view the full documentation from the [OpenKruise website](https://openkr
 - Install or upgrade Kruise with [the stable version](https://openkruise.io/docs/installation).
 - Install or upgrade Kruise with [the latest version including alpha/beta/rc](https://openkruise.io/docs/next/installation).
 
+### Get Your Own Demo with Alibaba Cloud
+
+- install Kruise on a Serverless K8S cluster in 3 minutes, try:
+
+  <a href="https://acs.console.aliyun.com/quick-deploy?repo=openkruise/charts&branch=master&paths=%5B%22versions/kruise/1.7.3%22%5D" target="_blank">
+    <img src="https://img.alicdn.com/imgextra/i1/O1CN01aiPSuA1Wiz7wkgF5u_!!6000000002823-55-tps-399-70.svg" width="200" alt="Deploy on Alibaba Cloud">
+  </a>
+
 ## Users
 
 Registration: [Who is using Kruise](https://github.com/openkruise/kruise/issues/289)
@@ -98,6 +107,9 @@ Active communication channels:
   - [Notes and agenda](https://shimo.im/docs/gXqmeQOYBehZ4vqo)
 - Bi-weekly Community Meeting (*English*): TODO
   - [Meeting Link(zoom)](https://us02web.zoom.us/j/87059136652?pwd=NlI4UThFWXVRZkxIU0dtR1NINncrQT09)
+
+## Security
+Please report vulnerabilities by email to kubernetes-security@service.aliyun.com. Also see our [SECURITY.md](SECURITY.md) file for details.
 
 ## License
 

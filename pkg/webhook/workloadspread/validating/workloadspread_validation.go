@@ -23,6 +23,7 @@ import (
 	"math"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	webhookutil "github.com/openkruise/kruise/pkg/webhook/util"
@@ -62,7 +63,7 @@ var (
 func verifyGroupKind(ref *appsv1alpha1.TargetReference, expectedKind string, expectedGroups []string) (bool, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
-		klog.Errorf("failed to parse GroupVersion for apiVersion (%s): %s", ref.APIVersion, err.Error())
+		klog.ErrorS(err, "failed to parse GroupVersion for apiVersion", "apiVersion", ref.APIVersion)
 		return false, err
 	}
 
@@ -161,6 +162,7 @@ func validateWorkloadSpreadSpec(h *WorkloadSpreadCreateUpdateHandler, obj *appsv
 				whiteList, err := configuration.GetWSWatchCustomWorkloadWhiteList(h.Client)
 				if err != nil {
 					allErrs = append(allErrs, field.InternalError(fldPath.Child("targetRef"), err))
+					break
 				}
 				matched := false
 				for _, wl := range whiteList.Workloads {
@@ -195,7 +197,7 @@ func validateWorkloadSpreadSpec(h *WorkloadSpreadCreateUpdateHandler, obj *appsv
 
 		if len(spec.Subsets) > 1 && spec.Subsets[len(spec.Subsets)-1].MaxReplicas != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("scheduleStrategy").Child("adaptive"),
-				spec.ScheduleStrategy.Adaptive.RescheduleCriticalSeconds, "the last subset must be not specified when using adaptive scheduleStrategy"))
+				spec.ScheduleStrategy.Adaptive.RescheduleCriticalSeconds, "the last subset's maxReplicas must be not specified when using adaptive scheduleStrategy"))
 		}
 
 		allowedMaxSeconds := int32(math.MaxInt32)
@@ -209,6 +211,13 @@ func validateWorkloadSpreadSpec(h *WorkloadSpreadCreateUpdateHandler, obj *appsv
 			(*spec.ScheduleStrategy.Adaptive.RescheduleCriticalSeconds < 0 || *spec.ScheduleStrategy.Adaptive.RescheduleCriticalSeconds > allowedMaxSeconds) {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("scheduleStrategy").Child("adaptive").Child("rescheduleCriticalSeconds"),
 				spec.ScheduleStrategy.Adaptive.RescheduleCriticalSeconds, fmt.Sprintf("rescheduleCriticalSeconds < 0 or rescheduleCriticalSeconds > %d is not permitted", allowedMaxSeconds)))
+		}
+	}
+
+	// validate targetFilter
+	if spec.TargetFilter != nil {
+		if _, err := metav1.LabelSelectorAsSelector(spec.TargetFilter.Selector); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("targetFilter"), spec.TargetFilter, err.Error()))
 		}
 	}
 
@@ -285,7 +294,6 @@ func validateWorkloadSpreadSubsets(ws *appsv1alpha1.WorkloadSpread, subsets []ap
 			allErrs = append(allErrs, corevalidation.ValidateTolerations(coreTolerations, fldPath.Index(i).Child("tolerations"))...)
 		}
 
-		//TODO validate patch
 		if subset.Patch.Raw != nil {
 			// In the case the WorkloadSpread is created before the workload,so no workloadTemplate is obtained, skip the remaining checks.
 			if workloadTemplate != nil {
@@ -293,7 +301,8 @@ func validateWorkloadSpreadSubsets(ws *appsv1alpha1.WorkloadSpread, subsets []ap
 				var podSpec v1.PodTemplateSpec
 				switch workloadTemplate.GetObjectKind().GroupVersionKind() {
 				case controllerKruiseKindCS:
-					podSpec = workloadTemplate.(*appsv1alpha1.CloneSet).Spec.Template
+					cs := workloadTemplate.(*appsv1alpha1.CloneSet)
+					podSpec = withVolumeClaimTemplates(cs.Spec.Template, cs.Spec.VolumeClaimTemplates)
 				case controllerKindDep:
 					podSpec = workloadTemplate.(*appsv1.Deployment).Spec.Template
 				case controllerKindRS:
@@ -301,7 +310,8 @@ func validateWorkloadSpreadSubsets(ws *appsv1alpha1.WorkloadSpread, subsets []ap
 				case controllerKindJob:
 					podSpec = workloadTemplate.(*batchv1.Job).Spec.Template
 				case controllerKindSts:
-					podSpec = workloadTemplate.(*appsv1.StatefulSet).Spec.Template
+					sts := workloadTemplate.(*appsv1.StatefulSet)
+					podSpec = withVolumeClaimTemplates(sts.Spec.Template, sts.Spec.VolumeClaimTemplates)
 				}
 				podBytes, _ := json.Marshal(podSpec)
 				modified, err := strategicpatch.StrategicMergePatch(podBytes, subset.Patch.Raw, &v1.Pod{})
@@ -356,6 +366,20 @@ func validateWorkloadSpreadSubsets(ws *appsv1alpha1.WorkloadSpread, subsets []ap
 		allErrs = append(allErrs, field.Invalid(fldPath.Index(0).Child("maxReplicas"), subsets[0].MaxReplicas, "maxReplicas sum of all subsets must equal 100% when type is specified as percent"))
 	}
 	return allErrs
+}
+
+func withVolumeClaimTemplates(pod v1.PodTemplateSpec, claims []v1.PersistentVolumeClaim) v1.PodTemplateSpec {
+	for _, pvc := range claims {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, v1.Volume{
+			Name: pvc.Name,
+			VolumeSource: v1.VolumeSource{
+				PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvc.Name,
+				},
+			},
+		})
+	}
+	return pod
 }
 
 func validateWorkloadSpreadConflict(ws *appsv1alpha1.WorkloadSpread, others []appsv1alpha1.WorkloadSpread, fldPath *field.Path) field.ErrorList {

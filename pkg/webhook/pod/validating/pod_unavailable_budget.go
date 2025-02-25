@@ -19,8 +19,6 @@ package validating
 import (
 	"context"
 
-	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
-	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +27,9 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/apis/policy"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	policyv1alpha1 "github.com/openkruise/kruise/apis/policy/v1alpha1"
+	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 )
 
 // parameters:
@@ -59,7 +60,7 @@ func (p *PodCreateHandler) podUnavailableBudgetValidatingPod(ctx context.Context
 		}
 		// the change will not cause pod unavailability, then pass
 		if !pubcontrol.PubControl.IsPodUnavailableChanged(oldPod, newPod) {
-			klog.V(6).Infof("validate pod(%s/%s) changed can not cause unavailability, then don't need check pub", newPod.Namespace, newPod.Name)
+			klog.V(6).InfoS("validate pod changed can not cause unavailability, then don't need check pub", "namespace", newPod.Namespace, "name", newPod.Name)
 			return true, "", nil
 		}
 		checkPod = oldPod
@@ -75,7 +76,7 @@ func (p *PodCreateHandler) podUnavailableBudgetValidatingPod(ctx context.Context
 	// filter out invalid Delete operation, only validate delete pods resources
 	case admissionv1.Delete:
 		if req.AdmissionRequest.SubResource != "" {
-			klog.V(6).Infof("pod(%s/%s) AdmissionRequest operation(DELETE) subResource(%s), then admit", req.Namespace, req.Name, req.SubResource)
+			klog.V(6).InfoS("pod AdmissionRequest operation(DELETE) subResource, then admit", "namespace", req.Namespace, "name", req.Name, "subResource", req.SubResource)
 			return true, "", nil
 		}
 		checkPod = &corev1.Pod{}
@@ -95,7 +96,7 @@ func (p *PodCreateHandler) podUnavailableBudgetValidatingPod(ctx context.Context
 	case admissionv1.Create:
 		// ignore create operation other than subresource eviction
 		if req.AdmissionRequest.SubResource != "eviction" {
-			klog.V(6).Infof("pod(%s/%s) AdmissionRequest operation(CREATE) Resource(%s) subResource(%s), then admit", req.Namespace, req.Name, req.Resource, req.SubResource)
+			klog.V(6).InfoS("pod AdmissionRequest operation(CREATE) Resource and subResource, then admit", "namespace", req.Namespace, "name", req.Name, "subResource", req.SubResource, "resource", req.Resource)
 			return true, "", nil
 		}
 		eviction := &policy.Eviction{}

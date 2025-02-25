@@ -23,24 +23,26 @@ import (
 	"strings"
 	"time"
 
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/util/podadapter"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	"github.com/openkruise/kruise/pkg/util"
+	"github.com/openkruise/kruise/pkg/util/podadapter"
+	"github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 var (
-	containerImagePatchRexp = regexp.MustCompile("^/spec/containers/([0-9]+)/image$")
-	rfc6901Decoder          = strings.NewReplacer("~1", "/", "~0", "~")
+	containerImagePatchRexp     = regexp.MustCompile("^/spec/containers/([0-9]+)/image$")
+	containerResourcesPatchRexp = regexp.MustCompile("^/spec/containers/([0-9]+)/resources/.*$")
+	rfc6901Decoder              = strings.NewReplacer("~1", "/", "~0", "~")
 
 	Clock clock.Clock = clock.RealClock{}
 )
@@ -58,6 +60,8 @@ type UpdateResult struct {
 }
 
 type UpdateOptions struct {
+	IgnoreVolumeClaimTemplatesHashDiff bool
+
 	GracePeriodSeconds int32
 	AdditionalFuncs    []func(*v1.Pod)
 
@@ -65,6 +69,7 @@ type UpdateOptions struct {
 	PatchSpecToPod                 func(pod *v1.Pod, spec *UpdateSpec, state *appspub.InPlaceUpdateState) (*v1.Pod, error)
 	CheckPodUpdateCompleted        func(pod *v1.Pod) error
 	CheckContainersUpdateCompleted func(pod *v1.Pod, state *appspub.InPlaceUpdateState) error
+	CheckPodNeedsBeUnready         func(pod *v1.Pod, spec *UpdateSpec) bool
 	GetRevision                    func(rev *apps.ControllerRevision) string
 }
 
@@ -79,14 +84,19 @@ type Interface interface {
 type UpdateSpec struct {
 	Revision string `json:"revision"`
 
-	ContainerImages       map[string]string            `json:"containerImages,omitempty"`
-	ContainerRefMetadata  map[string]metav1.ObjectMeta `json:"containerRefMetadata,omitempty"`
-	MetaDataPatch         []byte                       `json:"metaDataPatch,omitempty"`
-	UpdateEnvFromMetadata bool                         `json:"updateEnvFromMetadata,omitempty"`
-	GraceSeconds          int32                        `json:"graceSeconds,omitempty"`
+	ContainerImages       map[string]string                  `json:"containerImages,omitempty"`
+	ContainerRefMetadata  map[string]metav1.ObjectMeta       `json:"containerRefMetadata,omitempty"`
+	ContainerResources    map[string]v1.ResourceRequirements `json:"containerResources,omitempty"`
+	MetaDataPatch         []byte                             `json:"metaDataPatch,omitempty"`
+	UpdateEnvFromMetadata bool                               `json:"updateEnvFromMetadata,omitempty"`
+	GraceSeconds          int32                              `json:"graceSeconds,omitempty"`
 
 	OldTemplate *v1.PodTemplateSpec `json:"oldTemplate,omitempty"`
 	NewTemplate *v1.PodTemplateSpec `json:"newTemplate,omitempty"`
+}
+
+func (u *UpdateSpec) VerticalUpdateOnly() bool {
+	return len(u.ContainerResources) > 0 && len(u.ContainerImages) == 0 && !u.UpdateEnvFromMetadata
 }
 
 type realControl struct {
@@ -126,16 +136,16 @@ func (c *realControl) Refresh(pod *v1.Pod, opts *UpdateOptions) RefreshResult {
 
 		// check in-place updating has not completed yet
 		if checkErr := opts.CheckContainersUpdateCompleted(pod, &state); checkErr != nil {
-			klog.V(6).Infof("Check Pod %s/%s in-place update not completed yet: %v", pod.Namespace, pod.Name, checkErr)
+			klog.V(6).ErrorS(checkErr, "Check Pod in-place update not completed yet", "namespace", pod.Namespace, "name", pod.Name)
 			return RefreshResult{}
 		}
 
 		// check if there are containers with lower-priority that have to in-place update in next batch
-		if len(state.NextContainerImages) > 0 || len(state.NextContainerRefMetadata) > 0 {
+		if len(state.NextContainerImages) > 0 || len(state.NextContainerRefMetadata) > 0 || len(state.NextContainerResources) > 0 {
 
 			// pre-check the previous updated containers
 			if checkErr := doPreCheckBeforeNext(pod, state.PreCheckBeforeNext); checkErr != nil {
-				klog.V(5).Infof("Pod %s/%s in-place update pre-check not passed: %v", pod.Namespace, pod.Name, checkErr)
+				klog.V(5).ErrorS(checkErr, "Pod in-place update pre-check not passed", "namespace", pod.Namespace, "name", pod.Name)
 				return RefreshResult{}
 			}
 
@@ -254,6 +264,7 @@ func (c *realControl) updateNextBatch(pod *v1.Pod, opts *UpdateOptions) (bool, e
 			ContainerImages:       state.NextContainerImages,
 			ContainerRefMetadata:  state.NextContainerRefMetadata,
 			UpdateEnvFromMetadata: state.UpdateEnvFromMetadata,
+			ContainerResources:    state.NextContainerResources,
 		}
 		if clone, err = opts.PatchSpecToPod(clone, &spec, &state); err != nil {
 			return err
@@ -283,7 +294,8 @@ func (c *realControl) Update(pod *v1.Pod, oldRevision, newRevision *apps.Control
 	// TODO(FillZpp): maybe we should check if the previous in-place update has completed
 
 	// 2. update condition for pod with readiness-gate
-	if containsReadinessGate(pod) {
+	// When only workload resources are updated, they are marked as not needing to remove traffic
+	if opts.CheckPodNeedsBeUnready(pod, spec) {
 		newCondition := v1.PodCondition{
 			Type:               appspub.InPlaceUpdateReady,
 			LastTransitionTime: metav1.NewTime(Clock.Now()),
@@ -329,6 +341,8 @@ func (c *realControl) updatePodInPlace(pod *v1.Pod, spec *UpdateSpec, opts *Upda
 			Revision:              spec.Revision,
 			UpdateTimestamp:       metav1.NewTime(Clock.Now()),
 			UpdateEnvFromMetadata: spec.UpdateEnvFromMetadata,
+			UpdateImages:          len(spec.ContainerImages) > 0,
+			UpdateResources:       len(spec.ContainerResources) > 0,
 		}
 		inPlaceUpdateStateJSON, _ := json.Marshal(inPlaceUpdateState)
 		clone.Annotations[appspub.InPlaceUpdateStateKey] = string(inPlaceUpdateStateJSON)

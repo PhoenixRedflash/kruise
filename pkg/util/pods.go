@@ -288,6 +288,9 @@ func ContainsObjectRef(slice []v1.ObjectReference, obj v1.ObjectReference) bool 
 }
 
 func GetCondition(pod *v1.Pod, cType v1.PodConditionType) *v1.PodCondition {
+	if pod == nil {
+		return nil
+	}
 	for _, c := range pod.Status.Conditions {
 		if c.Type == cType {
 			return &c
@@ -369,7 +372,7 @@ func ExtractPort(param intstr.IntOrString, container v1.Container) (int, error) 
 	case intstr.String:
 		if port, err = findPortByName(container, param.StrVal); err != nil {
 			// Last ditch effort - maybe it was an int stored as string?
-			klog.Errorf("error : %v", err)
+			klog.ErrorS(err, "failed to find port by name")
 			if port, err = strconv.Atoi(param.StrVal); err != nil {
 				return port, err
 			}
@@ -401,4 +404,14 @@ func GetPodContainerByName(cName string, pod *v1.Pod) *v1.Container {
 	}
 
 	return nil
+}
+
+// IsRestartableInitContainer returns true if the initContainer has
+// ContainerRestartPolicyAlways.
+func IsRestartableInitContainer(initContainer *v1.Container) bool {
+	if initContainer.RestartPolicy == nil {
+		return false
+	}
+
+	return *initContainer.RestartPolicy == v1.ContainerRestartPolicyAlways
 }

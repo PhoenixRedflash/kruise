@@ -39,7 +39,7 @@ func init() {
 func TestNamespaceEventHandler(t *testing.T) {
 	distributor1 := buildResourceDistributionWithSecret()
 	env := append(makeEnvironment(), distributor1)
-	handlerClient := fake.NewFakeClientWithScheme(scheme, env...)
+	handlerClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(env...).Build()
 	enqueueHandler.reader = handlerClient
 
 	// case 1
@@ -75,10 +75,10 @@ func TestNamespaceEventHandler(t *testing.T) {
 
 func testEnqueueRequestForNamespaceCreate(namespace *corev1.Namespace, expectedNumber int, t *testing.T) {
 	createQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	createEvt := event.CreateEvent{
+	createEvt := event.TypedCreateEvent[*corev1.Namespace]{
 		Object: namespace,
 	}
-	enqueueHandler.Create(createEvt, createQ)
+	enqueueHandler.Create(context.TODO(), createEvt, createQ)
 	if createQ.Len() != expectedNumber {
 		t.Errorf("unexpected create event handle queue size, expected %d actual %d", expectedNumber, createQ.Len())
 	}
@@ -86,11 +86,11 @@ func testEnqueueRequestForNamespaceCreate(namespace *corev1.Namespace, expectedN
 
 func testEnqueueRequestForNamespaceUpdate(namespaceOld, namespaceNew *corev1.Namespace, expectedNumber int, t *testing.T) {
 	updateQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	updateEvt := event.UpdateEvent{
+	updateEvt := event.TypedUpdateEvent[*corev1.Namespace]{
 		ObjectOld: namespaceOld,
 		ObjectNew: namespaceNew,
 	}
-	enqueueHandler.Update(updateEvt, updateQ)
+	enqueueHandler.Update(context.TODO(), updateEvt, updateQ)
 	if updateQ.Len() != expectedNumber {
 		t.Errorf("unexpected update event handle queue size, expected %d actual %d", expectedNumber, updateQ.Len())
 	}
@@ -98,10 +98,10 @@ func testEnqueueRequestForNamespaceUpdate(namespaceOld, namespaceNew *corev1.Nam
 
 func testEnqueueRequestForNamespaceDelete(namespace *corev1.Namespace, expectedNumber int, t *testing.T) {
 	deleteQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	deleteEvt := event.DeleteEvent{
+	deleteEvt := event.TypedDeleteEvent[*corev1.Namespace]{
 		Object: namespace,
 	}
-	enqueueHandler.Delete(deleteEvt, deleteQ)
+	enqueueHandler.Delete(context.TODO(), deleteEvt, deleteQ)
 	if deleteQ.Len() != expectedNumber {
 		t.Errorf("unexpected delete event handle queue size, expected %d actual %d", expectedNumber, deleteQ.Len())
 	}

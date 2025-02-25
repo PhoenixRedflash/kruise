@@ -43,10 +43,10 @@ func TestPodEventHandler(t *testing.T) {
 
 	// create
 	createQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	createEvt := event.CreateEvent{
+	createEvt := event.TypedCreateEvent[*corev1.Pod]{
 		Object: podDemo,
 	}
-	handler.Create(createEvt, createQ)
+	handler.Create(context.TODO(), createEvt, createQ)
 	if createQ.Len() != 1 {
 		t.Errorf("unexpected create event handle queue size, expected 1 actual %d", createQ.Len())
 	}
@@ -57,11 +57,11 @@ func TestPodEventHandler(t *testing.T) {
 	readyCondition := podutil.GetPodReadyCondition(newPod.Status)
 	readyCondition.Status = corev1.ConditionFalse
 	updateQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	updateEvent := event.UpdateEvent{
+	updateEvent := event.TypedUpdateEvent[*corev1.Pod]{
 		ObjectOld: podDemo,
 		ObjectNew: newPod,
 	}
-	handler.Update(updateEvent, updateQ)
+	handler.Update(context.TODO(), updateEvent, updateQ)
 	if updateQ.Len() != 1 {
 		t.Errorf("unexpected update event handle queue size, expected 1 actual %d", updateQ.Len())
 	}
@@ -71,21 +71,21 @@ func TestPodEventHandler(t *testing.T) {
 	newPod.ResourceVersion = fmt.Sprintf("%d", time.Now().Unix())
 	newPod.Spec.Containers[0].Image = "nginx:latest"
 	updateQ = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	updateEvent = event.UpdateEvent{
+	updateEvent = event.TypedUpdateEvent[*corev1.Pod]{
 		ObjectOld: podDemo,
 		ObjectNew: newPod,
 	}
-	handler.Update(updateEvent, updateQ)
+	handler.Update(context.TODO(), updateEvent, updateQ)
 	if updateQ.Len() != 0 {
 		t.Errorf("unexpected update event handle queue size, expected 0 actual %d", updateQ.Len())
 	}
 
 	// delete
 	deleteQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	deleteEvt := event.DeleteEvent{
+	deleteEvt := event.TypedDeleteEvent[*corev1.Pod]{
 		Object: podDemo,
 	}
-	handler.Delete(deleteEvt, deleteQ)
+	handler.Delete(context.TODO(), deleteEvt, deleteQ)
 	if deleteQ.Len() != 0 {
 		t.Errorf("unexpected delete event handle queue size, expected 1 actual %d", deleteQ.Len())
 	}

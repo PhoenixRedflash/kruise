@@ -33,7 +33,6 @@ import (
 	"k8s.io/klog/v2"
 	coreval "k8s.io/kubernetes/pkg/apis/core/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -42,7 +41,7 @@ type ResourceDistributionCreateUpdateHandler struct {
 	Client client.Client
 
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 var _ admission.Handler = &ResourceDistributionCreateUpdateHandler{}
@@ -119,7 +118,7 @@ func (h *ResourceDistributionCreateUpdateHandler) validateResourceDistributionSp
 		}
 	}
 	if len(conflicted) != 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath, targets, fmt.Sprintf("ambiguous targets because namespace %v is in both IncludedNamespaces.List and ExcludedNamesapces.List", conflicted)))
+		allErrs = append(allErrs, field.Invalid(fldPath, targets, fmt.Sprintf("ambiguous targets because namespace %v is in both IncludedNamespaces.List and ExcludedNamespaces.List", conflicted)))
 	}
 
 	// 2. validate targets.NamespaceLabelSelector
@@ -157,24 +156,8 @@ func (h *ResourceDistributionCreateUpdateHandler) Handle(ctx context.Context, re
 		return admission.Errored(http.StatusForbidden, fmt.Errorf("feature-gate %s is not enabled", features.ResourceDistributionGate))
 	}
 	if allErrs := h.validateResourceDistribution(obj, oldObj); len(allErrs) != 0 {
-		klog.V(3).Infof("all errors of validation: %v", allErrs)
+		klog.V(3).InfoS("all errors of validation", "errors", fmt.Sprintf("%v", allErrs))
 		return admission.Errored(http.StatusUnprocessableEntity, allErrs.ToAggregate())
 	}
 	return admission.ValidationResponse(true, "")
-}
-
-var _ inject.Client = &ResourceDistributionCreateUpdateHandler{}
-
-// InjectClient injects the client into the ResourceDistributionCreateUpdateHandler
-func (h *ResourceDistributionCreateUpdateHandler) InjectClient(c client.Client) error {
-	h.Client = c
-	return nil
-}
-
-var _ admission.DecoderInjector = &ResourceDistributionCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the ResourceDistributionCreateUpdateHandler
-func (h *ResourceDistributionCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
 }

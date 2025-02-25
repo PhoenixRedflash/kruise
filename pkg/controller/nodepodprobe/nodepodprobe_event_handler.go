@@ -20,7 +20,6 @@ import (
 	"context"
 	"reflect"
 
-	appsalphav1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,36 +31,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsalphav1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
-var _ handler.EventHandler = &enqueueRequestForNodePodProbe{}
+var _ handler.TypedEventHandler[*appsalphav1.NodePodProbe] = &enqueueRequestForNodePodProbe{}
 
 type enqueueRequestForNodePodProbe struct{}
 
-func (p *enqueueRequestForNodePodProbe) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	obj, ok := evt.Object.(*appsalphav1.NodePodProbe)
-	if !ok {
-		return
-	}
+func (p *enqueueRequestForNodePodProbe) Create(ctx context.Context, evt event.TypedCreateEvent[*appsalphav1.NodePodProbe], q workqueue.RateLimitingInterface) {
+	obj := evt.Object
 	p.queue(q, obj)
 }
 
-func (p *enqueueRequestForNodePodProbe) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForNodePodProbe) Delete(ctx context.Context, evt event.TypedDeleteEvent[*appsalphav1.NodePodProbe], q workqueue.RateLimitingInterface) {
 }
 
-func (p *enqueueRequestForNodePodProbe) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForNodePodProbe) Generic(ctx context.Context, evt event.TypedGenericEvent[*appsalphav1.NodePodProbe], q workqueue.RateLimitingInterface) {
 }
 
-func (p *enqueueRequestForNodePodProbe) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForNodePodProbe) Update(ctx context.Context, evt event.TypedUpdateEvent[*appsalphav1.NodePodProbe], q workqueue.RateLimitingInterface) {
 	// must be deep copy before update the objection
-	new, ok := evt.ObjectNew.(*appsalphav1.NodePodProbe)
-	if !ok {
-		return
-	}
-	old, ok := evt.ObjectOld.(*appsalphav1.NodePodProbe)
-	if !ok {
-		return
-	}
+	new := evt.ObjectNew
+	old := evt.ObjectOld
 	if !reflect.DeepEqual(new.Status, old.Status) {
 		p.queue(q, new)
 	}
@@ -75,19 +67,17 @@ func (p *enqueueRequestForNodePodProbe) queue(q workqueue.RateLimitingInterface,
 	})
 }
 
-var _ handler.EventHandler = &enqueueRequestForPod{}
+var _ handler.TypedEventHandler[*corev1.Pod] = &enqueueRequestForPod{}
 
 type enqueueRequestForPod struct {
 	reader client.Reader
 }
 
-func (p *enqueueRequestForPod) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {}
+func (p *enqueueRequestForPod) Create(ctx context.Context, evt event.TypedCreateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+}
 
-func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	obj, ok := evt.Object.(*corev1.Pod)
-	if !ok {
-		return
-	}
+func (p *enqueueRequestForPod) Delete(ctx context.Context, evt event.TypedDeleteEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+	obj := evt.Object
 	// remove pod probe from nodePodProbe.spec
 	if obj.Spec.NodeName == "" {
 		return
@@ -95,7 +85,7 @@ func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLim
 	npp := &appsalphav1.NodePodProbe{}
 	if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: obj.Spec.NodeName}, npp); err != nil {
 		if !errors.IsNotFound(err) {
-			klog.Errorf("Get NodePodProbe(%s) failed: %s", obj.Spec.NodeName)
+			klog.ErrorS(err, "Failed to get NodePodProbe", "nodeName", obj.Spec.NodeName)
 		}
 		return
 	}
@@ -107,24 +97,18 @@ func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLim
 	}
 }
 
-func (p *enqueueRequestForPod) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Generic(ctx context.Context, evt event.TypedGenericEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 }
 
-func (p *enqueueRequestForPod) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	new, ok := evt.ObjectNew.(*corev1.Pod)
-	if !ok {
-		return
-	}
-	old, ok := evt.ObjectOld.(*corev1.Pod)
-	if !ok {
-		return
-	}
+func (p *enqueueRequestForPod) Update(ctx context.Context, evt event.TypedUpdateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+	new := evt.ObjectNew
+	old := evt.ObjectOld
 	// remove pod probe from nodePodProbe.spec
 	if new.Spec.NodeName != "" && kubecontroller.IsPodActive(old) && !kubecontroller.IsPodActive(new) {
 		npp := &appsalphav1.NodePodProbe{}
 		if err := p.reader.Get(context.TODO(), client.ObjectKey{Name: new.Spec.NodeName}, npp); err != nil {
 			if !errors.IsNotFound(err) {
-				klog.Errorf("Get NodePodProbe(%s) failed: %s", new.Spec.NodeName)
+				klog.ErrorS(err, "Failed to get NodePodProbe", "nodeName", new.Spec.NodeName)
 			}
 			return
 		}
@@ -145,10 +129,10 @@ type enqueueRequestForNode struct {
 	client.Reader
 }
 
-var _ handler.EventHandler = &enqueueRequestForNode{}
+var _ handler.TypedEventHandler[*corev1.Node] = &enqueueRequestForNode{}
 
-func (e *enqueueRequestForNode) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	node := evt.Object.(*corev1.Node)
+func (e *enqueueRequestForNode) Create(ctx context.Context, evt event.TypedCreateEvent[*corev1.Node], q workqueue.RateLimitingInterface) {
+	node := evt.Object
 	if node.Labels["type"] == VirtualKubelet {
 		return
 	}
@@ -159,11 +143,11 @@ func (e *enqueueRequestForNode) Create(evt event.CreateEvent, q workqueue.RateLi
 	e.nodeCreate(node, q)
 }
 
-func (e *enqueueRequestForNode) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (e *enqueueRequestForNode) Generic(ctx context.Context, evt event.TypedGenericEvent[*corev1.Node], q workqueue.RateLimitingInterface) {
 }
 
-func (e *enqueueRequestForNode) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	node := evt.ObjectNew.(*corev1.Node)
+func (e *enqueueRequestForNode) Update(ctx context.Context, evt event.TypedUpdateEvent[*corev1.Node], q workqueue.RateLimitingInterface) {
+	node := evt.ObjectNew
 	if node.Labels["type"] == VirtualKubelet {
 		return
 	}
@@ -174,8 +158,8 @@ func (e *enqueueRequestForNode) Update(evt event.UpdateEvent, q workqueue.RateLi
 	}
 }
 
-func (e *enqueueRequestForNode) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	node := evt.Object.(*corev1.Node)
+func (e *enqueueRequestForNode) Delete(ctx context.Context, evt event.TypedDeleteEvent[*corev1.Node], q workqueue.RateLimitingInterface) {
+	node := evt.Object
 	if node.Labels["type"] == VirtualKubelet {
 		return
 	}
@@ -186,17 +170,17 @@ func (e *enqueueRequestForNode) nodeCreate(node *corev1.Node, q workqueue.RateLi
 	npp := &appsalphav1.NodePodProbe{}
 	if err := e.Get(context.TODO(), client.ObjectKey{Name: node.Name}, npp); err != nil {
 		if errors.IsNotFound(err) {
-			klog.Infof("Node create event for nodePodProbe %v", node.Name)
+			klog.InfoS("Node created event for nodePodProbe", "nodeName", node.Name)
 			namespacedName := types.NamespacedName{Name: node.Name}
 			if !isNodeReady(node) {
-				klog.Infof("Skip to enqueue Node %s with not nodePodProbe, for not ready yet.", node.Name)
+				klog.InfoS("Skipped to enqueue Node with not nodePodProbe, for not ready yet", "nodeName", node.Name)
 				return
 			}
-			klog.Infof("Enqueue Node %s with not nodePodProbe.", node.Name)
+			klog.InfoS("Enqueue Node with not nodePodProbe", "nodeName", node.Name)
 			q.Add(reconcile.Request{NamespacedName: namespacedName})
 			return
 		}
-		klog.Errorf("Failed to get nodePodProbe for Node %s: %v", node.Name, err)
+		klog.ErrorS(err, "Failed to get nodePodProbe for Node", "nodeName", node.Name)
 	}
 }
 

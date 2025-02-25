@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+
 	"math"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -47,11 +49,13 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	ctrlUtil "github.com/openkruise/kruise/pkg/controller/util"
+	"github.com/openkruise/kruise/pkg/features"
 	"github.com/openkruise/kruise/pkg/util"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	"github.com/openkruise/kruise/pkg/util/configuration"
 	"github.com/openkruise/kruise/pkg/util/controllerfinder"
 	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
+	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	"github.com/openkruise/kruise/pkg/util/requeueduration"
@@ -102,7 +106,7 @@ var durationStore = requeueduration.DurationStore{}
 // Add creates a new WorkloadSpread Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !utildiscovery.DiscoverGVK(controllerKruiseKindWS) {
+	if !utildiscovery.DiscoverGVK(controllerKruiseKindWS) || !utilfeature.DefaultFeatureGate.Enabled(features.WorkloadSpread) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -119,37 +123,37 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch WorkloadSpread
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.WorkloadSpread{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(mgr.GetCache(), &appsv1alpha1.WorkloadSpread{}, &handler.TypedEnqueueRequestForObject[*appsv1alpha1.WorkloadSpread]{}))
 	if err != nil {
 		return err
 	}
 
 	// Watch for changes to Pods have a specific annotation
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &podEventHandler{})
+	err = c.Watch(source.Kind(mgr.GetCache(), &corev1.Pod{}, &podEventHandler{}))
 	if err != nil {
 		return err
 	}
 
 	// Watch for replica changes to CloneSet
-	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &workloadEventHandler{Reader: mgr.GetCache()})
+	err = c.Watch(source.Kind(mgr.GetCache(), client.Object(&appsv1alpha1.CloneSet{}), &workloadEventHandler{Reader: mgr.GetCache()}))
 	if err != nil {
 		return err
 	}
 
 	// Watch for replica changes to Deployment
-	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &workloadEventHandler{Reader: mgr.GetCache()})
+	err = c.Watch(source.Kind(mgr.GetCache(), client.Object(&appsv1.Deployment{}), &workloadEventHandler{Reader: mgr.GetCache()}))
 	if err != nil {
 		return err
 	}
 
 	// Watch for replica changes to ReplicaSet
-	err = c.Watch(&source.Kind{Type: &appsv1.ReplicaSet{}}, &workloadEventHandler{Reader: mgr.GetCache()})
+	err = c.Watch(source.Kind(mgr.GetCache(), client.Object(&appsv1.ReplicaSet{}), &workloadEventHandler{Reader: mgr.GetCache()}))
 	if err != nil {
 		return err
 	}
 
 	// Watch for parallelism changes to Job
-	err = c.Watch(&source.Kind{Type: &batchv1.Job{}}, &workloadEventHandler{Reader: mgr.GetCache()})
+	err = c.Watch(source.Kind(mgr.GetCache(), client.Object(&batchv1.Job{}), &workloadEventHandler{Reader: mgr.GetCache()}))
 	if err != nil {
 		return err
 	}
@@ -162,7 +166,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	if len(whiteList.Workloads) > 0 {
 		workloadHandler := &workloadEventHandler{Reader: mgr.GetClient()}
 		for _, workload := range whiteList.Workloads {
-			if _, err := ctrlUtil.AddWatcherDynamically(c, workloadHandler, workload.GroupVersionKind, "WorkloadSpread"); err != nil {
+			if _, err := ctrlUtil.AddWatcherDynamically(mgr, c, workloadHandler, workload.GroupVersionKind, "WorkloadSpread"); err != nil {
 				return err
 			}
 		}
@@ -216,7 +220,7 @@ func (r *ReconcileWorkloadSpread) Reconcile(_ context.Context, req reconcile.Req
 				Name:      req.Name,
 			},
 		}); cacheErr != nil {
-			klog.Warningf("Failed to delete workloadSpread(%s/%s) cache after deletion, err: %v", req.Namespace, req.Name, cacheErr)
+			klog.ErrorS(cacheErr, "Failed to delete workloadSpread cache after deletion", "workloadSpread", req)
 		}
 		return reconcile.Result{}, nil
 	} else if err != nil {
@@ -225,16 +229,16 @@ func (r *ReconcileWorkloadSpread) Reconcile(_ context.Context, req reconcile.Req
 	}
 
 	startTime := time.Now()
-	klog.V(3).Infof("Begin to process WorkloadSpread (%s/%s)", ws.Namespace, ws.Name)
+	klog.V(3).InfoS("Began to process WorkloadSpread", "workloadSpread", klog.KObj(ws))
 	err = r.syncWorkloadSpread(ws)
-	klog.V(3).Infof("Finished syncing WorkloadSpread (%s/%s), cost: %v", ws.Namespace, ws.Name, time.Since(startTime))
+	klog.V(3).InfoS("Finished syncing WorkloadSpread", "workloadSpread", klog.KObj(ws), "cost", time.Since(startTime))
 	return reconcile.Result{RequeueAfter: durationStore.Pop(getWorkloadSpreadKey(ws))}, err
 }
 
 func (r *ReconcileWorkloadSpread) getPodJob(ref *appsv1alpha1.TargetReference, namespace string) ([]*corev1.Pod, int32, error) {
 	ok, err := wsutil.VerifyGroupKind(ref, controllerKindJob.Kind, []string{controllerKindJob.Group})
 	if err != nil || !ok {
-		return nil, -1, err
+		return nil, 0, err
 	}
 
 	job := &batchv1.Job{}
@@ -242,16 +246,16 @@ func (r *ReconcileWorkloadSpread) getPodJob(ref *appsv1alpha1.TargetReference, n
 	if err != nil {
 		// when error is NotFound, it is ok here.
 		if errors.IsNotFound(err) {
-			klog.V(3).Infof("cannot find Job (%s/%s)", namespace, ref.Name)
+			klog.V(3).InfoS("Could not find Job", "job", klog.KRef(namespace, ref.Name))
 			return nil, 0, nil
 		}
-		return nil, -1, err
+		return nil, 0, err
 	}
 
 	labelSelector, err := util.ValidatedLabelSelectorAsSelector(job.Spec.Selector)
 	if err != nil {
-		klog.Errorf("gets labelSelector failed: %s", err.Error())
-		return nil, -1, nil
+		klog.ErrorS(err, "Failed to get labelSelector")
+		return nil, 0, err
 	}
 
 	podList := &corev1.PodList{}
@@ -262,7 +266,7 @@ func (r *ReconcileWorkloadSpread) getPodJob(ref *appsv1alpha1.TargetReference, n
 	}
 	err = r.List(context.TODO(), podList, listOption)
 	if err != nil {
-		return nil, -1, err
+		return nil, 0, err
 	}
 
 	matchedPods := make([]*corev1.Pod, 0, len(podList.Items))
@@ -272,15 +276,39 @@ func (r *ReconcileWorkloadSpread) getPodJob(ref *appsv1alpha1.TargetReference, n
 	return matchedPods, *(job.Spec.Parallelism), nil
 }
 
+func (r *ReconcileWorkloadSpread) getReplicasPathList(ws *appsv1alpha1.WorkloadSpread) ([]string, error) {
+	if ws.Spec.TargetReference == nil {
+		return nil, nil
+	}
+	if ws.Spec.TargetFilter != nil && len(ws.Spec.TargetFilter.ReplicasPathList) > 0 {
+		return ws.Spec.TargetFilter.ReplicasPathList, nil
+	}
+	whiteList, err := configuration.GetWSWatchCustomWorkloadWhiteList(r.Client)
+	if err != nil {
+		return nil, err
+	}
+	gv, err := schema.ParseGroupVersion(ws.Spec.TargetReference.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	for _, wl := range whiteList.Workloads {
+		if wl.GroupVersion() != gv || wl.GroupVersionKind.Kind != ws.Spec.TargetReference.Kind {
+			continue
+		}
+		klog.V(5).InfoS("found replicas path in whitelist", "path", wl.ReplicasPath, "workloadSpread", klog.KObj(ws))
+		return []string{wl.ReplicasPath}, nil
+	}
+	return nil, nil
+}
+
 // getPodsForWorkloadSpread returns Pods managed by the WorkloadSpread object.
 // return two parameters
 // 1. podList for workloadSpread
 // 2. workloadReplicas
 func (r *ReconcileWorkloadSpread) getPodsForWorkloadSpread(ws *appsv1alpha1.WorkloadSpread) ([]*corev1.Pod, int32, error) {
 	if ws.Spec.TargetReference == nil {
-		return nil, -1, nil
+		return nil, 0, nil
 	}
-
 	var pods []*corev1.Pod
 	var workloadReplicas int32
 	var err error
@@ -292,13 +320,66 @@ func (r *ReconcileWorkloadSpread) getPodsForWorkloadSpread(ws *appsv1alpha1.Work
 	default:
 		pods, workloadReplicas, err = r.controllerFinder.GetPodsForRef(targetRef.APIVersion, targetRef.Kind, ws.Namespace, targetRef.Name, false)
 	}
-
 	if err != nil {
-		klog.Errorf("WorkloadSpread (%s/%s) handles targetReference failed: %s", ws.Namespace, ws.Name, err.Error())
-		return nil, -1, err
+		klog.ErrorS(err, "WorkloadSpread handled targetReference failed", "workloadSpread", klog.KObj(ws))
+		return nil, 0, err
 	}
 
+	workloadReplicas, pods, err = r.filterWorkload(ws, pods, workloadReplicas)
+	if err != nil {
+		klog.ErrorS(err, "Filter workload failed", "workloadSpread", klog.KObj(ws))
+		return nil, 0, err
+	}
 	return pods, workloadReplicas, err
+}
+
+func (r *ReconcileWorkloadSpread) filterWorkload(ws *appsv1alpha1.WorkloadSpread, pods []*corev1.Pod, replicas int32) (int32, []*corev1.Pod, error) {
+	klog.V(5).InfoS("before workload filtering", "pods", len(pods), "replicas", replicas, "workloadSpread", klog.KObj(ws))
+	replicasPathList, err := r.getReplicasPathList(ws)
+	if err != nil {
+		return replicas, pods, err
+	}
+	var filteredReplicas int32
+	if len(replicasPathList) > 0 {
+		// replicas path list configured in someplace, should overwrite replicas value
+		targetRef := ws.Spec.TargetReference
+		wl, err := r.controllerFinder.GetControllerAsUnstructured(controllerfinder.ControllerReference{
+			APIVersion: targetRef.APIVersion,
+			Kind:       targetRef.Kind,
+			Name:       targetRef.Name,
+		}, ws.Namespace)
+		if err != nil {
+			return replicas, pods, client.IgnoreNotFound(err)
+		}
+		for _, replicasPath := range replicasPathList {
+			n, err := wsutil.GetReplicasFromObject(wl, replicasPath)
+			if err != nil {
+				return replicas, pods, err
+			}
+			filteredReplicas += n
+		}
+		klog.V(4).InfoS("replicas after filtering", "replicas", filteredReplicas,
+			"replicasPathList", replicasPathList, "workloadSpread", klog.KObj(ws))
+	} else {
+		filteredReplicas = replicas
+		klog.V(4).InfoS("replicas not filtered", "workloadSpread", klog.KObj(ws))
+	}
+	var filteredPods []*corev1.Pod
+	if ws.Spec.TargetFilter != nil && ws.Spec.TargetFilter.Selector != nil {
+		for _, pod := range pods {
+			selected, err := wsutil.IsPodSelected(ws.Spec.TargetFilter, pod.Labels)
+			if err != nil {
+				return replicas, pods, err
+			}
+			if selected {
+				filteredPods = append(filteredPods, pod)
+			}
+		}
+		klog.V(4).InfoS("pods after filtering", "pods", len(filteredPods), "selector", ws.Spec.TargetFilter.Selector)
+	} else {
+		filteredPods = pods
+	}
+	return filteredReplicas, filteredPods, nil
 }
 
 // syncWorkloadSpread is the main logic of the WorkloadSpread controller. Firstly, we get Pods from workload managed by
@@ -308,15 +389,17 @@ func (r *ReconcileWorkloadSpread) getPodsForWorkloadSpread(ws *appsv1alpha1.Work
 // to maintain WorkloadSpread status together. The controller is responsible for calculating the real status, and the webhook
 // mainly counts missingReplicas and records the creation or deletion entry of Pod into map.
 func (r *ReconcileWorkloadSpread) syncWorkloadSpread(ws *appsv1alpha1.WorkloadSpread) error {
+	if ws.Spec.TargetReference == nil {
+		klog.InfoS("WorkloadSpread has no target reference", "workloadSpread", klog.KObj(ws))
+		return nil
+	}
 	pods, workloadReplicas, err := r.getPodsForWorkloadSpread(ws)
-	if err != nil || workloadReplicas == -1 {
-		if err != nil {
-			klog.Errorf("WorkloadSpread (%s/%s) gets matched pods failed: %v", ws.Namespace, ws.Name, err)
-		}
+	if err != nil {
+		klog.ErrorS(err, "WorkloadSpread got matched pods failed", "workloadSpread", klog.KObj(ws))
 		return err
 	}
 	if len(pods) == 0 {
-		klog.Warningf("WorkloadSpread (%s/%s) has no matched pods, target workload's replicas[%d]", ws.Namespace, ws.Name, workloadReplicas)
+		klog.InfoS("WorkloadSpread had no matched pods", "workloadSpread", klog.KObj(ws), "targetWorkloadReplicas", workloadReplicas)
 	}
 
 	// group Pods by pod-revision and subset
@@ -356,7 +439,7 @@ func getInjectWorkloadSpreadFromPod(pod *corev1.Pod) *wsutil.InjectWorkloadSprea
 	injectWS := &wsutil.InjectWorkloadSpread{}
 	err := json.Unmarshal([]byte(injectStr), injectWS)
 	if err != nil {
-		klog.Errorf("failed to unmarshal %s from Pod (%s/%s)", injectStr, pod.Namespace, pod.Name)
+		klog.ErrorS(err, "Failed to unmarshal JSON from Pod", "JSON", injectStr, "pod", klog.KObj(pod))
 		return nil
 	}
 	return injectWS
@@ -395,7 +478,7 @@ func (r *ReconcileWorkloadSpread) groupPodBySubset(ws *appsv1alpha1.WorkloadSpre
 	for _, subset := range ws.Spec.Subsets {
 		podMap[subset.Name] = []*corev1.Pod{}
 		subsetMissingReplicas[subset.Name], _ = intstr.GetScaledValueFromIntOrPercent(
-			intstr.ValueOrDefault(subset.MaxReplicas, intstr.FromInt(math.MaxInt32)), int(replicas), true)
+			intstr.ValueOrDefault(subset.MaxReplicas, intstr.FromInt32(math.MaxInt32)), int(replicas), true)
 	}
 
 	// count managed pods for each subset
@@ -467,8 +550,8 @@ func (r *ReconcileWorkloadSpread) getAndUpdateSuitableSubsetName(ws *appsv1alpha
 		if err != nil {
 			// requiredSelectorTerm field was validated at webhook stage, so this error should not occur
 			// this error should not be returned, because it is a non-transient error
-			klog.Errorf("unexpected error occurred when matching pod (%s/%s) with subset, please check requiredSelectorTerm field of subset (%s) in WorkloadSpread (%s/%s), err: %s",
-				pod.Namespace, pod.Name, subset.Name, ws.Namespace, ws.Name, err.Error())
+			klog.ErrorS(err, "Unexpected error occurred when matching pod with subset, please check requiredSelectorTerm field of subset in WorkloadSpread",
+				"pod", klog.KObj(pod), "subsetName", subset.Name, "workloadSpread", klog.KObj(ws))
 		}
 		// select the most favorite subsets for the pod by subset.PreferredNodeSelectorTerms
 		if matched && preferredScore > maxPreferredScore {
@@ -520,8 +603,8 @@ func (r *ReconcileWorkloadSpread) patchFavoriteSubsetMetadataToPod(pod *corev1.P
 	})
 
 	if err := r.Patch(context.TODO(), pod, client.RawPatch(types.StrategicMergePatchType, patch)); err != nil {
-		klog.Errorf(`Failed to patch "matched-workloadspread:{Name: %s, Subset: %s} annotation" for pod (%s/%s), err: %s`,
-			ws.Name, favoriteSubset.Name, pod.Namespace, pod.Name, err.Error())
+		klog.ErrorS(err, `Failed to patch "matched-workloadspread" annotation for pod`,
+			"pod", klog.KObj(pod), "annotationValue", fmt.Sprintf("{Name: %s, Subset: %s}", ws.Name, favoriteSubset.Name))
 		return err
 	}
 
@@ -646,10 +729,9 @@ func (r *ReconcileWorkloadSpread) calculateWorkloadSpreadSubsetStatus(ws *appsv1
 		// MaxReplicas is nil, which means there is no limit for subset replicas, using -1 to represent it.
 		subsetMaxReplicas = -1
 	} else {
-		subsetMaxReplicas, err = intstr.GetValueFromIntOrPercent(subset.MaxReplicas, int(workloadReplicas), true)
+		subsetMaxReplicas, err = intstr.GetScaledValueFromIntOrPercent(subset.MaxReplicas, int(workloadReplicas), true)
 		if err != nil || subsetMaxReplicas < 0 {
-			klog.Errorf("failed to get maxReplicas value from subset (%s) of WorkloadSpread (%s/%s)",
-				subset.Name, ws.Namespace, ws.Name)
+			klog.ErrorS(err, "Failed to get maxReplicas value from subset of WorkloadSpread", "subsetName", subset.Name, "workloadSpread", klog.KObj(ws))
 			return nil
 		}
 	}
@@ -752,7 +834,7 @@ func (r *ReconcileWorkloadSpread) UpdateWorkloadSpreadStatus(ws *appsv1alpha1.Wo
 
 	err := r.writeWorkloadSpreadStatus(clone)
 	if err == nil {
-		klog.V(3).Info(makeStatusChangedLog(ws, status))
+		klog.V(3).InfoS(makeStatusChangedLog(ws, status), "workloadSpread", klog.KObj(ws))
 	}
 	return err
 }
@@ -813,7 +895,7 @@ func (r *ReconcileWorkloadSpread) writeWorkloadSpreadStatus(ws *appsv1alpha1.Wor
 	err := r.Status().Update(context.TODO(), ws)
 	if err == nil {
 		if cacheErr := util.GlobalCache.Add(ws); cacheErr != nil {
-			klog.Warningf("Failed to update workloadSpread(%s/%s) cache after update status, err: %v", ws.Namespace, ws.Name, cacheErr)
+			klog.ErrorS(cacheErr, "Failed to update WorkloadSpread cache after update status", "workloadSpread", klog.KObj(ws))
 		}
 	}
 	return err

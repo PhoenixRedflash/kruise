@@ -24,6 +24,20 @@ import (
 	"time"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	testingclock "k8s.io/utils/clock/testing"
+
+	apps "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/kruise/apis"
 	appspub "github.com/openkruise/kruise/apis/apps/pub"
@@ -36,18 +50,6 @@ import (
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 	"github.com/openkruise/kruise/pkg/util/lifecycle"
-	apps "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
-	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type manageCase struct {
@@ -305,6 +307,7 @@ func TestUpdate(t *testing.T) {
 						Annotations: map[string]string{appspub.InPlaceUpdateStateKey: util.DumpJSON(appspub.InPlaceUpdateState{
 							Revision:               "rev_new",
 							UpdateTimestamp:        now,
+							UpdateImages:           true,
 							LastContainerStatuses:  map[string]appspub.InPlaceUpdateContainerStatus{"c1": {ImageID: "image-id-xyz"}},
 							ContainerBatchesRecord: []appspub.InPlaceUpdateContainerBatch{{Timestamp: now, Containers: []string{"c1"}}},
 						})},
@@ -385,6 +388,7 @@ func TestUpdate(t *testing.T) {
 							appspub.InPlaceUpdateStateKey: util.DumpJSON(appspub.InPlaceUpdateState{
 								Revision:        "rev_new",
 								UpdateTimestamp: now,
+								UpdateImages:    true,
 							}),
 							appspub.InPlaceUpdateGraceKey: `{"revision":"rev_new","containerImages":{"c1":"foo2"},"graceSeconds":3630}`,
 						},
@@ -781,6 +785,7 @@ func TestUpdate(t *testing.T) {
 						Annotations: map[string]string{
 							appspub.InPlaceUpdateStateKey: util.DumpJSON(appspub.InPlaceUpdateState{
 								Revision:               "rev_new",
+								UpdateImages:           true,
 								UpdateTimestamp:        metav1.NewTime(now.Time),
 								LastContainerStatuses:  map[string]appspub.InPlaceUpdateContainerStatus{"c1": {ImageID: "image-id-xyz"}},
 								ContainerBatchesRecord: []appspub.InPlaceUpdateContainerBatch{{Timestamp: now, Containers: []string{"c1"}}},
@@ -947,7 +952,7 @@ func TestUpdate(t *testing.T) {
 		},
 	}
 
-	inplaceupdate.Clock = clock.NewFakeClock(now.Time)
+	inplaceupdate.Clock = testingclock.NewFakeClock(now.Time)
 	for _, mc := range cases {
 		t.Run(mc.name, func(t *testing.T) {
 			initialObjs := mc.initial()
@@ -981,6 +986,8 @@ func TestUpdate(t *testing.T) {
 				if err := ctrl.Client.Get(context.TODO(), types.NamespacedName{Namespace: p.Namespace, Name: p.Name}, gotPod); err != nil {
 					t.Fatalf("Failed to test %s, get pod %s error: %v", mc.name, p.Name, err)
 				}
+				gotPod.APIVersion = "v1"
+				gotPod.Kind = "Pod"
 
 				if v, ok := gotPod.Annotations[appspub.LifecycleTimestampKey]; ok {
 					if p.Annotations == nil {

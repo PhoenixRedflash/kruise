@@ -1312,25 +1312,24 @@ func TestSyncPodProbeMarker(t *testing.T) {
 
 	for _, cs := range cases {
 		t.Run(cs.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			builder.WithStatusSubresource(&appsv1alpha1.PodProbeMarker{}, &appsv1alpha1.NodePodProbe{})
 			for _, obj := range cs.getPods() {
-				err := fakeClient.Create(context.TODO(), obj.DeepCopy())
-				if err != nil {
-					t.Fatalf("create Pod failed: %s", err.Error())
-				}
+				builder.WithObjects(obj)
 			}
 			for _, obj := range cs.getPodProbeMarkers() {
-				err := fakeClient.Create(context.TODO(), obj.DeepCopy())
-				if err != nil {
-					t.Fatalf("create PodProbeMarker failed: %s", err.Error())
-				}
+				builder.WithObjects(obj)
 			}
 			for _, obj := range cs.getNodePodProbes() {
-				err := fakeClient.Create(context.TODO(), obj.DeepCopy())
-				if err != nil {
-					t.Fatalf("create NodePodProbes failed: %s", err.Error())
-				}
+				builder.WithObjects(obj)
 			}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-1",
+				},
+			}
+			builder.WithObjects(node)
+			fakeClient := builder.Build()
 
 			controllerfinder.Finder = &controllerfinder.ControllerFinder{Client: fakeClient}
 			recon := ReconcilePodProbeMarker{Client: fakeClient}
@@ -1354,8 +1353,8 @@ func checkNodePodProbeEqual(c client.WithWatch, t *testing.T, expect []*appsv1al
 			t.Fatalf("get NodePodProbe failed: %s", err.Error())
 			return false
 		}
-		t.Logf("expect: %v --> but: %v", util.DumpJSON(obj.Spec), util.DumpJSON(npp.Spec))
 		if !reflect.DeepEqual(obj.Spec, npp.Spec) {
+			t.Logf("expect: %v --> but: %v", util.DumpJSON(obj.Spec), util.DumpJSON(npp.Spec))
 			return false
 		}
 	}
@@ -1959,12 +1958,133 @@ func TestUpdateNodePodProbes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fakeclient := fake.NewFakeClientWithScheme(scheme, tc.nodePodProbe)
-			r := &ReconcilePodProbeMarker{Client: fakeclient}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tc.nodePodProbe).Build()
+			r := &ReconcilePodProbeMarker{Client: fakeClient}
 			get := r.updateNodePodProbes(tc.ppm, tc.nodeName, tc.pods)
 			if !reflect.DeepEqual(tc.getErr, get) {
 				t.Errorf("expect: %v, but: %v", tc.getErr, get)
 			}
 		})
 	}
+}
+
+func TestMarkerServerlessPod(t *testing.T) {
+	cases := []struct {
+		name                string
+		getPod              func() *corev1.Pod
+		markers             map[string][]appsv1alpha1.ProbeMarkerPolicy
+		expectedLabels      map[string]string
+		expectedAnnotations map[string]string
+	}{
+		{
+			name: "probe success",
+			getPod: func() *corev1.Pod {
+				obj := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pod-1",
+						Annotations: map[string]string{
+							"app": "web",
+						},
+						Labels: map[string]string{
+							"app": "web",
+						},
+					},
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{
+							{
+								Type:   corev1.PodInitialized,
+								Status: corev1.ConditionTrue,
+							},
+							{
+								Type:   corev1.PodConditionType("game.io/idle"),
+								Status: corev1.ConditionTrue,
+							},
+							{
+								Type:   corev1.PodConditionType("game.io/healthy"),
+								Status: corev1.ConditionFalse,
+							},
+						},
+					},
+				}
+
+				return obj
+			},
+			markers: map[string][]appsv1alpha1.ProbeMarkerPolicy{
+				"game.io/idle": {
+					{
+						State: appsv1alpha1.ProbeSucceeded,
+						Labels: map[string]string{
+							"gameserver-idle": "true",
+						},
+						Annotations: map[string]string{
+							"controller.kubernetes.io/pod-deletion-cost": "-10",
+						},
+					},
+					{
+						State: appsv1alpha1.ProbeFailed,
+						Labels: map[string]string{
+							"gameserver-idle": "false",
+						},
+						Annotations: map[string]string{
+							"controller.kubernetes.io/pod-deletion-cost": "10",
+						},
+					},
+				},
+				"game.io/healthy": {
+					{
+						State: appsv1alpha1.ProbeSucceeded,
+						Labels: map[string]string{
+							"gameserver-healthy": "true",
+						},
+						Annotations: map[string]string{
+							"controller.kubernetes.io/ingress": "true",
+						},
+					},
+					{
+						State: appsv1alpha1.ProbeFailed,
+						Labels: map[string]string{
+							"gameserver-healthy": "false",
+						},
+						Annotations: map[string]string{
+							"controller.kubernetes.io/ingress": "false",
+						},
+					},
+				},
+			},
+			expectedLabels: map[string]string{
+				"gameserver-healthy": "false",
+				"gameserver-idle":    "true",
+				"app":                "web",
+			},
+			expectedAnnotations: map[string]string{
+				"controller.kubernetes.io/ingress":           "false",
+				"controller.kubernetes.io/pod-deletion-cost": "-10",
+				"app": "web",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := tc.getPod()
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+			r := &ReconcilePodProbeMarker{Client: fakeClient}
+			err := r.markServerlessPod(tc.getPod(), tc.markers)
+			if err != nil {
+				t.Fatalf(err.Error())
+			}
+			newPod := &corev1.Pod{}
+			err = fakeClient.Get(context.TODO(), client.ObjectKeyFromObject(pod), newPod)
+			if err != nil {
+				t.Fatalf(err.Error())
+			}
+			if !reflect.DeepEqual(tc.expectedLabels, newPod.Labels) {
+				t.Errorf("expect: %v, but: %v", tc.expectedLabels, newPod.Labels)
+			}
+			if !reflect.DeepEqual(tc.expectedAnnotations, newPod.Annotations) {
+				t.Errorf("expect: %v, but: %v", tc.expectedAnnotations, newPod.Annotations)
+			}
+		})
+	}
+
 }

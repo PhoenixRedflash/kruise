@@ -18,6 +18,7 @@ limitations under the License.
 package kuberuntime
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,9 +30,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
+	kubelettypes "k8s.io/kubelet/pkg/types"
 	kubeletcontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
-	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 )
 
@@ -43,7 +44,7 @@ import (
 func (m *genericRuntimeManager) recordContainerEvent(pod *v1.Pod, container *v1.Container, containerID, eventType, reason, message string, args ...interface{}) {
 	ref, err := kubeletcontainer.GenerateContainerRef(pod, container)
 	if err != nil {
-		klog.Errorf("Can't make a ref to pod %q, container %v: %v", format.Pod(pod), container.Name, err)
+		klog.ErrorS(err, "Can't make a ref to pod container", "pod", format.Pod(pod), "container", container.Name)
 		return
 	}
 	eventMessage := message
@@ -62,7 +63,7 @@ func (m *genericRuntimeManager) recordContainerEvent(pod *v1.Pod, container *v1.
 // getPodContainerStatuses gets all containers' statuses for the pod.
 func (m *genericRuntimeManager) getPodContainerStatuses(uid types.UID, name, namespace string) ([]*kubeletcontainer.Status, error) {
 	// Select all containers of the given pod.
-	containers, err := m.runtimeService.ListContainers(&runtimeapi.ContainerFilter{
+	containers, err := m.runtimeService.ListContainers(context.TODO(), &runtimeapi.ContainerFilter{
 		LabelSelector: map[string]string{kubelettypes.KubernetesPodUIDLabel: string(uid)},
 	})
 	if err != nil {
@@ -70,7 +71,7 @@ func (m *genericRuntimeManager) getPodContainerStatuses(uid types.UID, name, nam
 	}
 	statuses := make([]*kubeletcontainer.Status, len(containers))
 	for i, c := range containers {
-		status, err := m.runtimeService.ContainerStatus(c.Id, false)
+		status, err := m.runtimeService.ContainerStatus(context.TODO(), c.Id, false)
 		if err != nil {
 			return nil, fmt.Errorf("run ContainerStatus for %s error: %v", c.Id, err)
 		}
@@ -91,13 +92,14 @@ func toKubeContainerStatus(status *runtimeapi.ContainerStatus, runtimeName strin
 			Type: runtimeName,
 			ID:   status.Id,
 		},
-		Name:         labeledInfo.ContainerName,
-		Image:        status.Image.Image,
-		ImageID:      status.ImageRef,
-		Hash:         annotatedInfo.Hash,
-		RestartCount: annotatedInfo.RestartCount,
-		State:        toKubeContainerState(status.State),
-		CreatedAt:    time.Unix(0, status.CreatedAt),
+		Name:                 labeledInfo.ContainerName,
+		Image:                status.Image.Image,
+		ImageID:              status.ImageRef,
+		Hash:                 annotatedInfo.Hash,
+		HashWithoutResources: annotatedInfo.HashWithoutResources,
+		RestartCount:         annotatedInfo.RestartCount,
+		State:                toKubeContainerState(status.State),
+		CreatedAt:            time.Unix(0, status.CreatedAt),
 	}
 
 	if status.State != runtimeapi.ContainerState_CONTAINER_CREATED {
@@ -115,8 +117,8 @@ func toKubeContainerStatus(status *runtimeapi.ContainerStatus, runtimeName strin
 }
 
 // RunInContainer synchronously executes the command in the container, and returns the output.
-func (m *genericRuntimeManager) RunInContainer(id kubeletcontainer.ContainerID, cmd []string, timeout time.Duration) ([]byte, error) {
-	stdout, stderr, err := m.runtimeService.ExecSync(id.ID, cmd, timeout)
+func (m *genericRuntimeManager) RunInContainer(ctx context.Context, id kubeletcontainer.ContainerID, cmd []string, timeout time.Duration) ([]byte, error) {
+	stdout, stderr, err := m.runtimeService.ExecSync(context.TODO(), id.ID, cmd, timeout)
 	// NOTE(tallclair): This does not correctly interleave stdout & stderr, but should be sufficient
 	// for logging purposes. A combined output option will need to be added to the ExecSyncRequest
 	// if more precise output ordering is ever required.
@@ -167,16 +169,16 @@ func (m *genericRuntimeManager) KillContainer(pod *v1.Pod, containerID kubeletco
 
 	if gracePeriodOverride != nil {
 		gracePeriod = *gracePeriodOverride
-		klog.V(3).Infof("Killing container %q, but using %d second grace period override", containerID, gracePeriod)
+		klog.V(3).InfoS("Killing container, but using grace period override", "containerID", containerID.String(), "gracePeriod", gracePeriod)
 	}
 
-	klog.V(2).Infof("Killing container %q with %d second grace period", containerID.String(), gracePeriod)
+	klog.V(2).InfoS("Killing container with grace period", "containerID", containerID.String(), "gracePeriod", gracePeriod)
 
-	err := m.runtimeService.StopContainer(containerID.ID, gracePeriod)
+	err := m.runtimeService.StopContainer(context.TODO(), containerID.ID, gracePeriod)
 	if err != nil {
-		klog.Errorf("Container %q termination failed with gracePeriod %d: %v", containerID.String(), gracePeriod, err)
+		klog.ErrorS(err, "Container termination failed with grace period", "containerID", containerID.String(), "gracePeriod", gracePeriod)
 	} else {
-		klog.V(3).Infof("Container %q exited normally", containerID.String())
+		klog.V(3).InfoS("Container exited normally", "containerID", containerID.String())
 	}
 
 	return err
@@ -193,7 +195,7 @@ func (m *genericRuntimeManager) KillContainer(pod *v1.Pod, containerID kubeletco
 func (m *genericRuntimeManager) restoreSpecsFromContainerLabels(containerID kubeletcontainer.ContainerID) (*v1.Pod, *v1.Container, error) {
 	var pod *v1.Pod
 	var container *v1.Container
-	s, err := m.runtimeService.ContainerStatus(containerID.ID, false)
+	s, err := m.runtimeService.ContainerStatus(context.TODO(), containerID.ID, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -228,24 +230,24 @@ func (m *genericRuntimeManager) restoreSpecsFromContainerLabels(containerID kube
 
 // executePreStopHook runs the pre-stop lifecycle hooks if applicable and returns the duration it takes.
 func (m *genericRuntimeManager) executePreStopHook(pod *v1.Pod, containerID kubeletcontainer.ContainerID, containerSpec *v1.Container, gracePeriod int64) int64 {
-	klog.V(3).Infof("Running preStop hook for container %q", containerID.String())
+	klog.V(3).InfoS("Running preStop hook for container", "containerID", containerID.String())
 
 	start := metav1.Now()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer utilruntime.HandleCrash()
-		if msg, err := m.runner.Run(containerID, pod, containerSpec, containerSpec.Lifecycle.PreStop); err != nil {
-			klog.Errorf("preStop hook for container %q failed: %v", containerSpec.Name, err)
+		if msg, err := m.runner.Run(context.TODO(), containerID, pod, containerSpec, containerSpec.Lifecycle.PreStop); err != nil {
+			klog.ErrorS(err, "preStop hook for container failed", "name", containerSpec.Name)
 			m.recordContainerEvent(pod, containerSpec, containerID.ID, v1.EventTypeWarning, events.FailedPreStopHook, msg)
 		}
 	}()
 
 	select {
 	case <-time.After(time.Duration(gracePeriod) * time.Second):
-		klog.V(2).Infof("preStop hook for container %q did not complete in %d seconds", containerID, gracePeriod)
+		klog.V(2).InfoS("preStop hook for container did not complete in time", "containerID", containerID.String(), "gracePeriod", gracePeriod)
 	case <-done:
-		klog.V(3).Infof("preStop hook for container %q completed", containerID)
+		klog.V(3).InfoS("preStop hook for container completed", "containerID", containerID.String())
 	}
 
 	return int64(metav1.Now().Sub(start.Time).Seconds())

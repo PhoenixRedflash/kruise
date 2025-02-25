@@ -17,6 +17,7 @@ limitations under the License.
 package broadcastjob
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"reflect"
@@ -24,9 +25,7 @@ import (
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +39,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
 func init() {
@@ -543,6 +544,10 @@ func TestJobFailedAfterActiveDeadline(t *testing.T) {
 	activeDeadline := int64(0)
 	now := metav1.Now()
 	job := &appsv1alpha1.BroadcastJob{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "BroadcastJob",
+			APIVersion: "apps.kruise.io/v1alpha1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "job10",
 			Namespace: "default",
@@ -601,7 +606,8 @@ func TestJobFailedAfterActiveDeadline(t *testing.T) {
 }
 
 func createReconcileJob(scheme *runtime.Scheme, initObjs ...client.Object) ReconcileBroadcastJob {
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObjs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(initObjs...).WithStatusSubresource(&appsv1alpha1.BroadcastJob{}).Build()
 	eventBroadcaster := record.NewBroadcaster()
 	recorder := eventBroadcaster.NewRecorder(scheme, v1.EventSource{Component: "broadcast-controller"})
 	reconcileJob := ReconcileBroadcastJob{
@@ -629,6 +635,10 @@ func createNode(nodeName string) *v1.Node {
 
 func createJob(jobName string, parallelism intstr.IntOrString) *appsv1alpha1.BroadcastJob {
 	job1 := &appsv1alpha1.BroadcastJob{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "BroadcastJob",
+			APIVersion: "apps.kruise.io/v1alpha1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: "default",

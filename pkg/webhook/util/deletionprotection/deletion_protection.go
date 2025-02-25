@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
@@ -30,7 +31,6 @@ import (
 	"github.com/openkruise/kruise/pkg/features"
 	utilclient "github.com/openkruise/kruise/pkg/util/client"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func ValidateWorkloadDeletion(obj metav1.Object, replicas *int32) error {
@@ -44,6 +44,30 @@ func ValidateWorkloadDeletion(obj metav1.Object, replicas *int32) error {
 		if replicas != nil && *replicas > 0 {
 			return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s and replicas %d>0", policyv1alpha1.DeletionProtectionKey, val, *replicas)
 		}
+	default:
+	}
+	return nil
+}
+
+func ValidateServiceDeletion(service *v1.Service) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourcesDeletionProtection) || service.DeletionTimestamp != nil {
+		return nil
+	}
+	switch val := service.Labels[policyv1alpha1.DeletionProtectionKey]; val {
+	case policyv1alpha1.DeletionProtectionTypeAlways:
+		return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s", policyv1alpha1.DeletionProtectionKey, val)
+	default:
+	}
+	return nil
+}
+
+func ValidateIngressDeletion(obj metav1.Object) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ResourcesDeletionProtection) || obj.GetDeletionTimestamp() != nil {
+		return nil
+	}
+	switch val := obj.GetLabels()[policyv1alpha1.DeletionProtectionKey]; val {
+	case policyv1alpha1.DeletionProtectionTypeAlways:
+		return fmt.Errorf("forbidden by ResourcesProtectionDeletion for %s=%s", policyv1alpha1.DeletionProtectionKey, val)
 	default:
 	}
 	return nil

@@ -49,10 +49,10 @@ func TestNodeEventHandler(t *testing.T) {
 	_ = fakeClient.Create(context.TODO(), demo)
 	// create
 	createQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	createEvt := event.CreateEvent{
+	createEvt := event.TypedCreateEvent[*corev1.Node]{
 		Object: demo,
 	}
-	handler.Create(createEvt, createQ)
+	handler.Create(context.TODO(), createEvt, createQ)
 	if createQ.Len() != 1 {
 		t.Errorf("unexpected create event handle queue size, expected 1 actual %d", createQ.Len())
 	}

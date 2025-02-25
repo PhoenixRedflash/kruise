@@ -38,8 +38,6 @@ import (
 	validationutil "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/kruise/apis/apps/pub"
@@ -62,7 +60,7 @@ var (
 // PodProbeMarkerCreateUpdateHandler handles PodProbeMarker
 type PodProbeMarkerCreateUpdateHandler struct {
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 var _ admission.Handler = &PodProbeMarkerCreateUpdateHandler{}
@@ -175,7 +173,7 @@ func validatePodProbeMarkerSpec(obj *appsv1alpha1.PodProbeMarker, fldPath *field
 
 func validateSelector(selector *metav1.LabelSelector, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, metavalidation.ValidateLabelSelector(selector, fldPath)...)
+	allErrs = append(allErrs, metavalidation.ValidateLabelSelector(selector, metavalidation.LabelSelectorValidationOptions{}, fldPath)...)
 	if len(selector.MatchLabels)+len(selector.MatchExpressions) == 0 {
 		allErrs = append(allErrs, field.Invalid(fldPath, selector, "empty selector is not valid for podProbeMarker."))
 	}
@@ -287,19 +285,4 @@ func validatePodProbeMarkerName(name string, prefix bool) (allErrs []string) {
 		allErrs = append(allErrs, validationutil.MaxLenError(nameMaxLen))
 	}
 	return allErrs
-}
-
-var _ inject.Client = &PodProbeMarkerCreateUpdateHandler{}
-
-// InjectClient injects the client into the PodProbeMarkerCreateUpdateHandler
-func (h *PodProbeMarkerCreateUpdateHandler) InjectClient(c client.Client) error {
-	return nil
-}
-
-var _ admission.DecoderInjector = &PodProbeMarkerCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the PodProbeMarkerCreateUpdateHandler
-func (h *PodProbeMarkerCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
 }

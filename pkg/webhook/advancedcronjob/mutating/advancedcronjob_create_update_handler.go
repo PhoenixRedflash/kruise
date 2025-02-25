@@ -22,13 +22,14 @@ import (
 	"net/http"
 	"reflect"
 
+	admissionv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
 	"github.com/openkruise/kruise/apis/apps/defaults"
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/features"
 	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	admissionv1 "k8s.io/api/admission/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // BroadcastJobCreateUpdateHandler handles BroadcastJob
@@ -40,7 +41,7 @@ type AdvancedCronJobCreateUpdateHandler struct {
 	// Client  client.Client
 
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 var _ admission.Handler = &AdvancedCronJobCreateUpdateHandler{}
@@ -88,11 +89,3 @@ func (h *AdvancedCronJobCreateUpdateHandler) Handle(ctx context.Context, req adm
 //	h.Client = c
 //	return nil
 //}
-
-var _ admission.DecoderInjector = &AdvancedCronJobCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the BroadcastJobCreateUpdateHandler
-func (h *AdvancedCronJobCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
-}

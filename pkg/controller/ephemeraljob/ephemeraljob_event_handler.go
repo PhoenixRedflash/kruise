@@ -4,8 +4,6 @@ import (
 	"context"
 	"reflect"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/expectations"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
@@ -13,27 +11,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util/expectations"
 )
 
 type podHandler struct {
 	client.Reader
 }
 
-func (e *podHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	pod, ok := evt.Object.(*corev1.Pod)
-	if !ok {
-		return
-	}
+func (e *podHandler) Create(ctx context.Context, evt event.TypedCreateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+	pod := evt.Object
 
 	e.handle(pod, q)
 }
 
-func (e *podHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (e *podHandler) Generic(ctx context.Context, evt event.TypedGenericEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 }
 
-func (e *podHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	oldPod := evt.ObjectOld.(*corev1.Pod)
-	curPod := evt.ObjectNew.(*corev1.Pod)
+func (e *podHandler) Update(ctx context.Context, evt event.TypedUpdateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+	oldPod := evt.ObjectOld
+	curPod := evt.ObjectNew
 	if curPod.ResourceVersion == oldPod.ResourceVersion {
 		return
 	}
@@ -45,11 +43,8 @@ func (e *podHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInter
 	e.handle(curPod, q)
 }
 
-func (e *podHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	pod, ok := evt.Object.(*corev1.Pod)
-	if !ok {
-		return
-	}
+func (e *podHandler) Delete(ctx context.Context, evt event.TypedDeleteEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
+	pod := evt.Object
 	e.handle(pod, q)
 }
 
@@ -75,11 +70,8 @@ type ejobHandler struct {
 	client.Reader
 }
 
-func (e *ejobHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
-	ejob, ok := evt.Object.(*appsv1alpha1.EphemeralJob)
-	if !ok {
-		return
-	}
+func (e *ejobHandler) Create(ctx context.Context, evt event.TypedCreateEvent[*appsv1alpha1.EphemeralJob], q workqueue.RateLimitingInterface) {
+	ejob := evt.Object
 	if ejob.DeletionTimestamp != nil {
 		return
 	}
@@ -87,18 +79,18 @@ func (e *ejobHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInte
 	q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: ejob.Namespace, Name: ejob.Name}})
 }
 
-func (e *ejobHandler) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (e *ejobHandler) Generic(ctx context.Context, evt event.TypedGenericEvent[*appsv1alpha1.EphemeralJob], q workqueue.RateLimitingInterface) {
 }
 
-func (e *ejobHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
-	oldEJob := evt.ObjectOld.(*appsv1alpha1.EphemeralJob)
-	curEJob := evt.ObjectNew.(*appsv1alpha1.EphemeralJob)
+func (e *ejobHandler) Update(ctx context.Context, evt event.TypedUpdateEvent[*appsv1alpha1.EphemeralJob], q workqueue.RateLimitingInterface) {
+	oldEJob := evt.ObjectOld
+	curEJob := evt.ObjectNew
 	if oldEJob.ResourceVersion == curEJob.ResourceVersion {
 		return
 	}
 
 	if curEJob.DeletionTimestamp != nil {
-		klog.V(3).Infof("Observed deleting ephemeral job: %s/%s", curEJob.Namespace, curEJob.Name)
+		klog.V(3).InfoS("Observed deleting EphemeralJob", "ephemeralJob", klog.KObj(curEJob))
 		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: curEJob.Namespace, Name: curEJob.Name}})
 		return
 	}
@@ -107,16 +99,13 @@ func (e *ejobHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitingInte
 	if oldEJob.Spec.TTLSecondsAfterFinished != curEJob.Spec.TTLSecondsAfterFinished ||
 		oldEJob.Spec.Paused != curEJob.Spec.Paused || oldEJob.Spec.Parallelism != curEJob.Spec.Parallelism ||
 		oldEJob.Spec.Replicas != curEJob.Spec.Replicas {
-		klog.V(3).Infof("Observed updated Spec for ephemeral job: %s/%s", curEJob.Namespace, curEJob.Name)
+		klog.V(3).InfoS("Observed updated Spec for EphemeralJob", "ephemeralJob", klog.KObj(curEJob))
 		q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Namespace: curEJob.Namespace, Name: curEJob.Name}})
 	}
 }
 
-func (e *ejobHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
-	ejob, ok := evt.Object.(*appsv1alpha1.EphemeralJob)
-	if !ok {
-		return
-	}
+func (e *ejobHandler) Delete(ctx context.Context, evt event.TypedDeleteEvent[*appsv1alpha1.EphemeralJob], q workqueue.RateLimitingInterface) {
+	ejob := evt.Object
 	key := types.NamespacedName{Namespace: ejob.Namespace, Name: ejob.Name}
 	scaleExpectations.DeleteExpectations(key.String())
 }

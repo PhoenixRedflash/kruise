@@ -22,16 +22,19 @@ import (
 	"regexp"
 
 	"github.com/appscode/jsonpatch"
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
-	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/features"
+	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
+	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 )
 
 var (
@@ -142,6 +145,11 @@ func (c *commonControl) GetUpdateOptions() *inplaceupdate.UpdateOptions {
 	if c.Spec.UpdateStrategy.InPlaceUpdateStrategy != nil {
 		opts.GracePeriodSeconds = c.Spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds
 	}
+	// For the InPlaceOnly strategy, ignore the hash comparison of VolumeClaimTemplates.
+	// Consider making changes through a feature gate.
+	if c.Spec.UpdateStrategy.Type == appsv1alpha1.InPlaceOnlyCloneSetUpdateStrategyType {
+		opts.IgnoreVolumeClaimTemplatesHashDiff = true
+	}
 	return opts
 }
 
@@ -195,12 +203,23 @@ func (c *commonControl) IgnorePodUpdateEvent(oldPod, curPod *v1.Pod) bool {
 		}
 		return false
 	}
+	isPodInplaceUpdating := func(pod *v1.Pod) bool {
+		if len(pod.Labels) > 0 && appspub.LifecycleStateType(pod.Labels[appspub.LifecycleStateKey]) != appspub.LifecycleStateNormal {
+			return true
+		}
+		return false
+	}
 
-	if containsReadinessGate(curPod) {
+	if containsReadinessGate(curPod) || isPodInplaceUpdating(curPod) {
 		opts := c.GetUpdateOptions()
 		opts = inplaceupdate.SetOptionsDefaults(opts)
 		if err := containersUpdateCompleted(curPod, opts.CheckContainersUpdateCompleted); err == nil {
 			if cond := inplaceupdate.GetCondition(curPod); cond == nil || cond.Status != v1.ConditionTrue {
+				return false
+			}
+			// if InPlaceWorkloadVerticalScaling is enabled, we should not ignore the update event of updating pod
+			// for handling only in-place resource resize
+			if utilfeature.DefaultFeatureGate.Enabled(features.InPlaceWorkloadVerticalScaling) {
 				return false
 			}
 		}

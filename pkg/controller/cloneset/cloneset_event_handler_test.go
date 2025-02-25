@@ -21,17 +21,18 @@ import (
 	"testing"
 	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
-	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
-	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util/expectations"
-	"github.com/openkruise/kruise/pkg/util/feature"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/features"
+	"github.com/openkruise/kruise/pkg/util/expectations"
+	"github.com/openkruise/kruise/pkg/util/feature"
 )
 
 func newTestPodEventHandler(reader client.Reader) *podEventHandler {
@@ -45,20 +46,20 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 	cases := []struct {
 		name                          string
 		css                           []*appsv1alpha1.CloneSet
-		e                             event.CreateEvent
+		e                             event.TypedCreateEvent[*v1.Pod]
 		alterExpectationCreationsKey  string
 		alterExpectationCreationsAdds []string
 		expectedQueueLen              int
 	}{
 		{
 			name: "no cs",
-			e:    event.CreateEvent{Object: &v1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &metav1.Time{Time: time.Now()}}}},
+			e:    event.TypedCreateEvent[*v1.Pod]{Object: &v1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &metav1.Time{Time: time.Now()}}}},
 
 			expectedQueueLen: 0,
 		},
 		{
 			name: "no cs",
-			e:    event.CreateEvent{Object: &v1.Pod{}},
+			e:    event.TypedCreateEvent[*v1.Pod]{Object: &v1.Pod{}},
 
 			expectedQueueLen: 0,
 		},
@@ -98,7 +99,7 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 					},
 				},
 			},
-			e:                event.CreateEvent{Object: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-abc", Labels: map[string]string{"key": "v1"}}}},
+			e:                event.TypedCreateEvent[*v1.Pod]{Object: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-abc", Labels: map[string]string{"key": "v1"}}}},
 			expectedQueueLen: 2,
 		},
 		{
@@ -139,7 +140,7 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 					},
 				},
 			},
-			e: event.CreateEvent{
+			e: event.TypedCreateEvent[*v1.Pod]{
 				Object: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "default",
@@ -182,7 +183,7 @@ func TestEnqueueRequestForPodCreate(t *testing.T) {
 			modifySatisfied = true
 		}
 
-		enqueueHandler.Create(testCase.e, q)
+		enqueueHandler.Create(context.TODO(), testCase.e, q)
 		if q.Len() != testCase.expectedQueueLen {
 			t.Fatalf("%s failed, expected queue len %d, got queue len %d", testCase.name, testCase.expectedQueueLen, q.Len())
 		}
@@ -199,12 +200,12 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 	cases := []struct {
 		name             string
 		css              []*appsv1alpha1.CloneSet
-		e                event.UpdateEvent
+		e                event.TypedUpdateEvent[*v1.Pod]
 		expectedQueueLen int
 	}{
 		{
 			name:             "resourceVersion no changed",
-			e:                event.UpdateEvent{ObjectNew: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "01"}}, ObjectOld: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "01"}}},
+			e:                event.TypedUpdateEvent[*v1.Pod]{ObjectNew: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "01"}}, ObjectOld: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "01"}}},
 			expectedQueueLen: 0,
 		},
 		{
@@ -245,7 +246,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -320,7 +321,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -395,7 +396,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -469,7 +470,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -543,7 +544,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -616,7 +617,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -681,7 +682,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 					},
 				},
 			},
-			e: event.UpdateEvent{
+			e: event.TypedUpdateEvent[*v1.Pod]{
 				ObjectOld: &v1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace:       "default",
@@ -734,7 +735,7 @@ func TestEnqueueRequestForPodUpdate(t *testing.T) {
 		enqueueHandler := newTestPodEventHandler(fakeClient)
 		q := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "test-queue")
 
-		enqueueHandler.Update(testCase.e, q)
+		enqueueHandler.Update(context.TODO(), testCase.e, q)
 		time.Sleep(time.Millisecond * 10)
 		if q.Len() != testCase.expectedQueueLen {
 			t.Fatalf("%s failed, expected queue len %d, got queue len %d", testCase.name, testCase.expectedQueueLen, q.Len())

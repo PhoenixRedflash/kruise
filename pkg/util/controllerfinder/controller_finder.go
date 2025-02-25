@@ -21,6 +21,7 @@ import (
 
 	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
+	apiutil "github.com/openkruise/kruise/pkg/util/api"
 	"github.com/openkruise/kruise/pkg/util/configuration"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,8 @@ import (
 )
 
 var Finder *ControllerFinder
+
+const ReplicasUnknown int32 = -1
 
 func InitControllerFinder(mgr manager.Manager) error {
 	Finder = &ControllerFinder{
@@ -72,10 +75,10 @@ func InitControllerFinder(mgr manager.Manager) error {
 // controller finder functions.
 type ScaleAndSelector struct {
 	ControllerReference
-	// controller.spec.Replicas
+	// controller.spec.Replicas; the value -1 means it is uncertain currently
 	Scale int32
 	// kruise statefulSet.spec.ReserveOrdinals
-	ReserveOrdinals []int
+	ReserveOrdinals sets.Set[int]
 	// controller.spec.Selector
 	Selector *metav1.LabelSelector
 	// metadata
@@ -155,7 +158,7 @@ func (r *ControllerFinder) GetScaleAndSelectorForRef(apiVersion, kind, ns, name 
 
 func (r *ControllerFinder) Finders() []PodControllerFinder {
 	return []PodControllerFinder{r.getPodReplicationController, r.getPodDeployment, r.getPodReplicaSet,
-		r.getPodStatefulSet, r.getPodKruiseCloneSet, r.getPodKruiseStatefulSet, r.getPodStatefulSetLike, r.getScaleController}
+		r.getPodStatefulSet, r.getPodKruiseCloneSet, r.getPodKruiseStatefulSet, r.getPodStatefulSetLike, r.getScaleController, r.getRefUID}
 }
 
 var (
@@ -379,7 +382,7 @@ func (r *ControllerFinder) getPodKruiseStatefulSet(ref ControllerReference, name
 
 	return &ScaleAndSelector{
 		Scale:           *(ss.Spec.Replicas),
-		ReserveOrdinals: ss.Spec.ReserveOrdinals,
+		ReserveOrdinals: apiutil.GetReserveOrdinalIntSet(ss.Spec.ReserveOrdinals),
 		Selector:        ss.Spec.Selector,
 		ControllerReference: ControllerReference{
 			APIVersion: ss.APIVersion,
@@ -465,7 +468,9 @@ func (r *ControllerFinder) getScaleController(ref ControllerReference, namespace
 		Group: gv.Group,
 		Kind:  ref.Kind,
 	}
-
+	if r.mapper == nil {
+		return nil, nil // only happens in test scenarios, preventing panic
+	}
 	mapping, err := r.mapper.RESTMapping(gk, gv.Version)
 	if err != nil {
 		return nil, err
@@ -496,6 +501,38 @@ func (r *ControllerFinder) getScaleController(ref ControllerReference, namespace
 		},
 		Metadata: scale.ObjectMeta,
 		Selector: selector,
+	}, nil
+}
+
+func (r *ControllerFinder) GetControllerAsUnstructured(ref ControllerReference, namespace string) (*unstructured.Unstructured, error) {
+	un := unstructured.Unstructured{}
+	un.SetAPIVersion(ref.APIVersion)
+	un.SetKind(ref.Kind)
+	return &un, r.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: ref.Name}, &un)
+}
+
+func (r *ControllerFinder) getRefUID(ref ControllerReference, namespace string) (*ScaleAndSelector, error) {
+	un, err := r.GetControllerAsUnstructured(ref, namespace)
+	if err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	return &ScaleAndSelector{
+		Scale: ReplicasUnknown,
+		ControllerReference: ControllerReference{
+			APIVersion: ref.APIVersion,
+			Kind:       ref.Kind,
+			Name:       ref.Name,
+			UID:        un.GetUID(),
+		},
+		Metadata: metav1.ObjectMeta{
+			Namespace:       un.GetNamespace(),
+			Name:            un.GetName(),
+			Annotations:     un.GetAnnotations(),
+			UID:             un.GetUID(),
+			OwnerReferences: un.GetOwnerReferences(),
+			Labels:          un.GetLabels(),
+			ResourceVersion: un.GetResourceVersion(),
+		},
 	}, nil
 }
 

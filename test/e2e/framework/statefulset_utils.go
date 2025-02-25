@@ -19,6 +19,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -30,9 +31,6 @@ import (
 
 	"github.com/onsi/gomega"
 
-	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
-	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
-	"github.com/openkruise/kruise/test/e2e/manifest"
 	apps "k8s.io/api/apps/v1"
 	appsV1beta2 "k8s.io/api/apps/v1beta2"
 	v1 "k8s.io/api/core/v1"
@@ -46,6 +44,10 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+
+	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
+	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
+	"github.com/openkruise/kruise/test/e2e/manifest"
 )
 
 const (
@@ -397,6 +399,28 @@ func (s *StatefulSetTester) WaitForPodNotReady(set *appsv1beta1.StatefulSet, pod
 
 }
 
+// WaitForPodUpdatedAndRunning wait for the Pod named podName to be updated and running, the pod should have revision other than the one in currentRevision
+func (s *StatefulSetTester) WaitForPodUpdatedAndRunning(set *appsv1beta1.StatefulSet, podName string, currentRevision string) (*appsv1beta1.StatefulSet, *v1.PodList) {
+	var pods *v1.PodList
+	s.WaitForState(set, func(set2 *appsv1beta1.StatefulSet, pods2 *v1.PodList) (bool, error) {
+		set = set2
+		pods = pods2
+		for i := range pods.Items {
+			if pods.Items[i].Name != podName {
+				continue
+			}
+
+			if pods.Items[i].Labels[apps.StatefulSetRevisionLabel] != currentRevision &&
+				podutil.IsPodReady(&pods.Items[i]) {
+				return true, nil
+			}
+			return false, nil
+		}
+		return false, nil
+	})
+	return set, pods
+}
+
 // WaitForRollingUpdate waits for all Pods in set to exist and have the correct revision and for the RollingUpdate to
 // complete. set must have a RollingUpdateStatefulSetStrategyType.
 func (s *StatefulSetTester) WaitForRollingUpdate(set *appsv1beta1.StatefulSet) (*appsv1beta1.StatefulSet, *v1.PodList) {
@@ -635,6 +659,34 @@ func (s *StatefulSetTester) WaitForStatusReadyReplicas(ss *appsv1beta1.StatefulS
 	}
 }
 
+func (s *StatefulSetTester) WaitForStatusPVCReadyReplicas(ss *appsv1beta1.StatefulSet, expectedReplicas int32) {
+	Logf("Waiting for statefulset status.volume updated to %d", expectedReplicas)
+
+	ns, name := ss.Namespace, ss.Name
+	pollErr := wait.PollImmediate(StatefulSetPoll, StatefulSetTimeout,
+		func() (bool, error) {
+			ssGet, err := s.kc.AppsV1beta1().StatefulSets(ns).Get(context.TODO(), name, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			if ssGet.Status.ObservedGeneration < ss.Generation {
+				return false, nil
+			}
+			for _, template := range ssGet.Status.VolumeClaims {
+				if template.CompatibleReplicas != expectedReplicas ||
+					template.CompatibleReadyReplicas != expectedReplicas {
+					Logf("Waiting for stateful set status.VolumeClaims.CompatibleReadyReplicas to become %d, currently %d",
+						expectedReplicas, template.CompatibleReadyReplicas)
+					return false, nil
+				}
+			}
+			return true, nil
+		})
+	if pollErr != nil {
+		Failf("Failed waiting for stateful set volumeClaimTemplates compatibleReadyReplicas updated to %d: %v", expectedReplicas, pollErr)
+	}
+}
+
 // WaitForStatusReplicas waits for the ss.Status.Replicas to be equal to expectedReplicas
 func (s *StatefulSetTester) WaitForStatusReplicas(ss *appsv1beta1.StatefulSet, expectedReplicas int32) {
 	Logf("Waiting for statefulset status.replicas updated to %d", expectedReplicas)
@@ -674,6 +726,10 @@ func (s *StatefulSetTester) CheckServiceName(ss *appsv1beta1.StatefulSet, expect
 
 // SortStatefulPods sorts pods by their ordinals
 func (s *StatefulSetTester) SortStatefulPods(pods *v1.PodList) {
+	sort.Sort(statefulPodsByOrdinal(pods.Items))
+}
+
+func SortStatefulPods(pods *v1.PodList) {
 	sort.Sort(statefulPodsByOrdinal(pods.Items))
 }
 
@@ -761,7 +817,7 @@ func NewStatefulSetPVC(name string) v1.PersistentVolumeClaim {
 			AccessModes: []v1.PersistentVolumeAccessMode{
 				v1.ReadWriteOnce,
 			},
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceStorage: *resource.NewQuantity(1, resource.BinarySI),
 				},
@@ -818,6 +874,16 @@ func NewStatefulSet(name, ns, governingSvcName string, replicas int32, statefulP
 							Image:           imageutils.GetE2EImage(imageutils.Nginx),
 							VolumeMounts:    mounts,
 							ImagePullPolicy: v1.PullIfNotPresent,
+							Resources: v1.ResourceRequirements{
+								Requests: map[v1.ResourceName]resource.Quantity{
+									v1.ResourceCPU:    resource.MustParse("200m"),
+									v1.ResourceMemory: resource.MustParse("200Mi"),
+								},
+								Limits: map[v1.ResourceName]resource.Quantity{
+									v1.ResourceCPU:    resource.MustParse("1"),
+									v1.ResourceMemory: resource.MustParse("1Gi"),
+								},
+							},
 						},
 					},
 					Volumes: vols,
@@ -898,4 +964,36 @@ func UpdateStatefulSetWithRetries(kc kruiseclientset.Interface, namespace, name 
 		pollErr = fmt.Errorf("couldn't apply the provided updated to stateful set %q: %v", name, updateErr)
 	}
 	return statefulSet, pollErr
+}
+
+// GetPodList gets the current Pods in ss.
+func (s *StatefulSetTester) GetPVCList(ss *appsv1beta1.StatefulSet) *v1.PersistentVolumeClaimList {
+	selector, err := metav1.LabelSelectorAsSelector(ss.Spec.Selector)
+	ExpectNoError(err)
+	pvcList, err := s.c.CoreV1().PersistentVolumeClaims(ss.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: selector.String()})
+	ExpectNoError(err)
+	return pvcList
+}
+func (s *StatefulSetTester) WaitForPVCState(ss *appsv1beta1.StatefulSet, until func(*appsv1beta1.StatefulSet, *v1.PersistentVolumeClaimList) (bool, error)) {
+	pollErr := wait.PollImmediate(StatefulSetPoll, StatefulSetTimeout,
+		func() (bool, error) {
+			ssGet, err := s.kc.AppsV1beta1().StatefulSets(ss.Namespace).Get(context.TODO(), ss.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			pvcList := s.GetPVCList(ssGet)
+			return until(ssGet, pvcList)
+		})
+	if pollErr != nil {
+		Failf("Failed waiting for state update: %v", pollErr)
+	}
+}
+
+func GetVolumeTemplateName(pvcName, stsName string) (string, error) {
+	prefix := strings.Index(pvcName, stsName)
+	if prefix > 0 {
+		sub := pvcName[:prefix-1]
+		return sub, nil
+	}
+	return "", errors.New("pvc is not created by sts")
 }

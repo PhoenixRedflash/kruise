@@ -22,12 +22,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+
+	"github.com/openkruise/kruise/pkg/control/pubcontrol"
 )
 
 func TestPodEventHandler(t *testing.T) {
@@ -41,11 +42,11 @@ func TestPodEventHandler(t *testing.T) {
 
 	// create
 	createQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	createEvt := event.CreateEvent{
+	createEvt := event.TypedCreateEvent[*corev1.Pod]{
 		Object: podDemo.DeepCopy(),
 	}
 	createEvt.Object.SetAnnotations(map[string]string{pubcontrol.PodRelatedPubAnnotation: pubDemo.Name})
-	handler.Create(createEvt, createQ)
+	handler.Create(context.TODO(), createEvt, createQ)
 	if createQ.Len() != 1 {
 		t.Errorf("unexpected create event handle queue size, expected 1 actual %d", createQ.Len())
 	}
@@ -56,13 +57,13 @@ func TestPodEventHandler(t *testing.T) {
 	readyCondition := podutil.GetPodReadyCondition(newPod.Status)
 	readyCondition.Status = corev1.ConditionFalse
 	updateQ := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	updateEvent := event.UpdateEvent{
+	updateEvent := event.TypedUpdateEvent[*corev1.Pod]{
 		ObjectOld: podDemo,
 		ObjectNew: newPod,
 	}
 	updateEvent.ObjectOld.SetAnnotations(map[string]string{pubcontrol.PodRelatedPubAnnotation: pubDemo.Name})
 	updateEvent.ObjectNew.SetAnnotations(map[string]string{pubcontrol.PodRelatedPubAnnotation: pubDemo.Name})
-	handler.Update(updateEvent, updateQ)
+	handler.Update(context.TODO(), updateEvent, updateQ)
 	if updateQ.Len() != 1 {
 		t.Errorf("unexpected update event handle queue size, expected 1 actual %d", updateQ.Len())
 	}
@@ -72,13 +73,13 @@ func TestPodEventHandler(t *testing.T) {
 	newPod.ResourceVersion = fmt.Sprintf("%d", time.Now().Unix())
 	newPod.Spec.Containers[0].Image = "nginx:latest"
 	updateQ = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	updateEvent = event.UpdateEvent{
+	updateEvent = event.TypedUpdateEvent[*corev1.Pod]{
 		ObjectOld: podDemo,
 		ObjectNew: newPod,
 	}
 	updateEvent.ObjectOld.SetAnnotations(map[string]string{pubcontrol.PodRelatedPubAnnotation: pubDemo.Name})
 	updateEvent.ObjectNew.SetAnnotations(map[string]string{pubcontrol.PodRelatedPubAnnotation: pubDemo.Name})
-	handler.Update(updateEvent, updateQ)
+	handler.Update(context.TODO(), updateEvent, updateQ)
 	if updateQ.Len() != 0 {
 		t.Errorf("unexpected update event handle queue size, expected 0 actual %d", updateQ.Len())
 	}

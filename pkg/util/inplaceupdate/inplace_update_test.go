@@ -23,18 +23,19 @@ import (
 	"testing"
 	"time"
 
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	"github.com/openkruise/kruise/pkg/features"
-	"github.com/openkruise/kruise/pkg/util"
-	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
-	"github.com/openkruise/kruise/pkg/util/revisionadapter"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
+	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	"github.com/openkruise/kruise/pkg/features"
+	"github.com/openkruise/kruise/pkg/util"
+	utilfeature "github.com/openkruise/kruise/pkg/util/feature"
+	"github.com/openkruise/kruise/pkg/util/revisionadapter"
 )
 
 func TestCalculateInPlaceUpdateSpec(t *testing.T) {
@@ -63,6 +64,7 @@ func TestCalculateInPlaceUpdateSpec(t *testing.T) {
 			expectedSpec: &UpdateSpec{
 				Revision:             "new-revision",
 				ContainerImages:      map[string]string{"c1": "foo2"},
+				ContainerResources:   map[string]v1.ResourceRequirements{},
 				ContainerRefMetadata: make(map[string]metav1.ObjectMeta),
 			},
 		},
@@ -78,6 +80,7 @@ func TestCalculateInPlaceUpdateSpec(t *testing.T) {
 			expectedSpec: &UpdateSpec{
 				Revision:             "new-revision",
 				ContainerImages:      map[string]string{"c1": "foo2"},
+				ContainerResources:   map[string]v1.ResourceRequirements{},
 				ContainerRefMetadata: make(map[string]metav1.ObjectMeta),
 			},
 		},
@@ -93,6 +96,7 @@ func TestCalculateInPlaceUpdateSpec(t *testing.T) {
 			expectedSpec: &UpdateSpec{
 				Revision:             "new-revision",
 				ContainerImages:      map[string]string{"c1": "foo2"},
+				ContainerResources:   map[string]v1.ResourceRequirements{},
 				ContainerRefMetadata: make(map[string]metav1.ObjectMeta),
 				MetaDataPatch:        []byte(`{"metadata":{"labels":{"k1":"v1"}}}`),
 			},
@@ -109,6 +113,7 @@ func TestCalculateInPlaceUpdateSpec(t *testing.T) {
 			expectedSpec: &UpdateSpec{
 				Revision:              "new-revision",
 				ContainerImages:       map[string]string{"c1": "foo2"},
+				ContainerResources:    map[string]v1.ResourceRequirements{},
 				ContainerRefMetadata:  map[string]metav1.ObjectMeta{"c1": {Labels: map[string]string{"k": "v2"}}},
 				MetaDataPatch:         []byte(`{"metadata":{"labels":{"k1":"v1"}}}`),
 				UpdateEnvFromMetadata: true,
@@ -126,6 +131,7 @@ func TestCalculateInPlaceUpdateSpec(t *testing.T) {
 			expectedSpec: &UpdateSpec{
 				Revision:             "new-revision",
 				ContainerImages:      map[string]string{"c1": "foo2"},
+				ContainerResources:   map[string]v1.ResourceRequirements{},
 				ContainerRefMetadata: make(map[string]metav1.ObjectMeta),
 				MetaDataPatch:        []byte(`{"metadata":{"$deleteFromPrimitiveList/finalizers":["fz1"],"$setElementOrder/finalizers":["fz2"],"labels":{"k1":"v1","k2":null}}}`),
 			},
@@ -615,7 +621,7 @@ func TestRefresh(t *testing.T) {
 		},
 	}
 
-	Clock = clock.NewFakeClock(aHourAgo.Time)
+	Clock = testingclock.NewFakeClock(aHourAgo.Time)
 	for i, testCase := range cases {
 		testCase.pod.Name = fmt.Sprintf("pod-%d", i)
 		testCase.expectedPod.Name = fmt.Sprintf("pod-%d", i)
@@ -632,6 +638,9 @@ func TestRefresh(t *testing.T) {
 		if err := cli.Get(context.TODO(), types.NamespacedName{Name: testCase.pod.Name}, got); err != nil {
 			t.Fatalf("failed to get pod: %v", err)
 		}
+
+		got.APIVersion = "v1"
+		got.Kind = "Pod"
 
 		testCase.expectedPod.ResourceVersion = got.ResourceVersion
 		if !reflect.DeepEqual(testCase.expectedPod, got) {

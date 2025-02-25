@@ -22,24 +22,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-var _ handler.EventHandler = &enqueueRequestForPod{}
+var _ handler.TypedEventHandler[*corev1.Pod] = &enqueueRequestForPod{}
 
 type enqueueRequestForPod struct {
 	reader client.Reader
 }
 
-func (p *enqueueRequestForPod) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Create(ctx context.Context, evt event.TypedCreateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 	p.addPod(q, evt.Object)
 }
 
-func (p *enqueueRequestForPod) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Delete(ctx context.Context, evt event.TypedDeleteEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 	p.deletePod(evt.Object)
 }
 
-func (p *enqueueRequestForPod) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Generic(ctx context.Context, evt event.TypedGenericEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 }
 
-func (p *enqueueRequestForPod) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+func (p *enqueueRequestForPod) Update(ctx context.Context, evt event.TypedUpdateEvent[*corev1.Pod], q workqueue.RateLimitingInterface) {
 	p.updatePod(q, evt.ObjectOld, evt.ObjectNew)
 }
 
@@ -51,7 +51,7 @@ func (p *enqueueRequestForPod) deletePod(obj runtime.Object) {
 
 	sidecarSets, err := p.getPodMatchedSidecarSets(pod)
 	if err != nil {
-		klog.Errorf("unable to get sidecarSets related with pod %s/%s, err: %v", pod.Namespace, pod.Name, err)
+		klog.ErrorS(err, "Unable to get sidecarSets related with pod", "pod", klog.KObj(pod))
 		return
 	}
 	for _, sidecarSet := range sidecarSets {
@@ -69,12 +69,12 @@ func (p *enqueueRequestForPod) addPod(q workqueue.RateLimitingInterface, obj run
 
 	sidecarSets, err := p.getPodMatchedSidecarSets(pod)
 	if err != nil {
-		klog.Errorf("unable to get sidecarSets related with pod %s/%s, err: %v", pod.Namespace, pod.Name, err)
+		klog.ErrorS(err, "Unable to get sidecarSets related with pod", "pod", klog.KObj(pod))
 		return
 	}
 
 	for _, sidecarSet := range sidecarSets {
-		klog.V(3).Infof("Create pod(%s/%s) and reconcile sidecarSet(%s)", pod.Namespace, pod.Name, sidecarSet.Name)
+		klog.V(3).InfoS("Created pod and reconcile sidecarSet", "pod", klog.KObj(pod), "sidecarSet", klog.KObj(sidecarSet))
 		q.Add(reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Name: sidecarSet.Name,
@@ -92,7 +92,7 @@ func (p *enqueueRequestForPod) updatePod(q workqueue.RateLimitingInterface, old,
 
 	matchedSidecarSets, err := p.getPodMatchedSidecarSets(newPod)
 	if err != nil {
-		klog.Errorf("unable to get sidecarSets of pod %s/%s, err: %v", newPod.Namespace, newPod.Name, err)
+		klog.ErrorS(err, "Unable to get sidecarSets of pod", "pod", klog.KObj(newPod))
 		return
 	}
 	for _, sidecarSet := range matchedSidecarSets {
@@ -128,7 +128,7 @@ func (p *enqueueRequestForPod) getPodMatchedSidecarSets(pod *corev1.Pod) ([]*app
 				Name: sidecarSetName,
 			}, sidecarSet); err != nil {
 				if errors.IsNotFound(err) {
-					klog.V(6).Infof("pod(%s/%s) sidecarSet(%s) Not Found", pod.Namespace, pod.Name, sidecarSetName)
+					klog.V(6).InfoS("Could not find SidecarSet for Pod", "pod", klog.KObj(pod), "sidecarSetName", sidecarSetName)
 					continue
 				}
 				return nil, err
@@ -140,29 +140,13 @@ func (p *enqueueRequestForPod) getPodMatchedSidecarSets(pod *corev1.Pod) ([]*app
 		return matchedSidecarSets, nil
 	}
 
-	// This code will trigger an invalid reconcile, where the Pod matches the sidecarSet selector but does not inject the sidecar container.
-	// Comment out this code to reduce some invalid reconcile.
-	/*sidecarSets := appsv1alpha1.SidecarSetList{}
-	if err := p.reader.List(context.TODO(), &sidecarSets); err != nil {
-		return nil, err
-	}
-
-	for _, sidecarSet := range sidecarSets.Items {
-		matched, err := sidecarcontrol.PodMatchedSidecarSet(pod, sidecarSet)
-		if err != nil {
-			return nil, err
-		}
-		if matched {
-			matchedSidecarSets = append(matchedSidecarSets, &sidecarSet)
-		}
-	}*/
 	return matchedSidecarSets, nil
 }
 
 func isPodStatusChanged(oldPod, newPod *corev1.Pod) bool {
 	// If the pod's deletion timestamp is set, remove endpoint from ready address.
 	if oldPod.DeletionTimestamp.IsZero() && !newPod.DeletionTimestamp.IsZero() {
-		klog.V(3).Infof("pod(%s/%s) DeletionTimestamp changed, and reconcile sidecarSet", newPod.Namespace, newPod.Name)
+		klog.V(3).InfoS("Pod DeletionTimestamp changed, and reconcile sidecarSet", "pod", klog.KObj(newPod))
 		return true
 		// oldPod Deletion is set, then no reconcile
 	} else if !oldPod.DeletionTimestamp.IsZero() {
@@ -176,8 +160,7 @@ func isPodStatusChanged(oldPod, newPod *corev1.Pod) bool {
 	oldReady := podutil.IsPodReady(oldPod)
 	newReady := podutil.IsPodReady(newPod)
 	if oldReady != newReady {
-		klog.V(3).Infof("pod(%s/%s) Ready changed(from %v to %v), and reconcile sidecarSet",
-			newPod.Namespace, newPod.Name, oldReady, newReady)
+		klog.V(3).InfoS("Pod Ready changed, and reconcile SidecarSet", "pod", klog.KObj(newPod), "oldReady", oldReady, "newReady", newReady)
 		return true
 	}
 
@@ -191,16 +174,16 @@ func isPodConsistentChanged(oldPod, newPod *corev1.Pod, sidecarSet *appsv1alpha1
 	oldConsistent := control.IsPodStateConsistent(oldPod, nil)
 	newConsistent := control.IsPodStateConsistent(newPod, nil)
 	if oldConsistent != newConsistent {
-		klog.V(3).Infof("pod(%s/%s) sidecar containers consistent changed(from %v to %v), and reconcile sidecarSet(%s)",
-			newPod.Namespace, newPod.Name, oldConsistent, newConsistent, sidecarSet.Name)
+		klog.V(3).InfoS("Pod's sidecar containers consistent changed, and reconcile SidecarSet",
+			"pod", klog.KObj(newPod), "oldConsistent", oldConsistent, "newConsistent", newConsistent, "sidecarSet", klog.KObj(sidecarSet))
 		enqueueDelayTime = 5 * time.Second
 		return true, enqueueDelayTime
 	}
 
 	// If the pod's labels changed, and sidecarSet enable selector updateStrategy, should reconcile.
 	if !reflect.DeepEqual(oldPod.Labels, newPod.Labels) && sidecarSet.Spec.UpdateStrategy.Selector != nil {
-		klog.V(3).Infof("pod(%s/%s) Labels changed and sidecarSet (%s) enable selector upgrade strategy, "+
-			"and reconcile sidecarSet", newPod.Namespace, newPod.Name, sidecarSet.Name)
+		klog.V(3).InfoS("Pod's Labels changed and SidecarSet enable selector upgrade strategy, and reconcile SidecarSet",
+			"pod", klog.KObj(newPod), "sidecarSet", klog.KObj(sidecarSet))
 		return true, 0
 	}
 

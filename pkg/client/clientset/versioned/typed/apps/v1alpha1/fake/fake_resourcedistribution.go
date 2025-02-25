@@ -23,7 +23,6 @@ import (
 	v1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -34,9 +33,9 @@ type FakeResourceDistributions struct {
 	Fake *FakeAppsV1alpha1
 }
 
-var resourcedistributionsResource = schema.GroupVersionResource{Group: "apps.kruise.io", Version: "v1alpha1", Resource: "resourcedistributions"}
+var resourcedistributionsResource = v1alpha1.SchemeGroupVersion.WithResource("resourcedistributions")
 
-var resourcedistributionsKind = schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "ResourceDistribution"}
+var resourcedistributionsKind = v1alpha1.SchemeGroupVersion.WithKind("ResourceDistribution")
 
 // Get takes name of the resourceDistribution, and returns the corresponding resourceDistribution object, and an error if there is any.
 func (c *FakeResourceDistributions) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.ResourceDistribution, err error) {
@@ -109,7 +108,7 @@ func (c *FakeResourceDistributions) UpdateStatus(ctx context.Context, resourceDi
 // Delete takes name of the resourceDistribution and deletes it. Returns an error if one occurs.
 func (c *FakeResourceDistributions) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
 	_, err := c.Fake.
-		Invokes(testing.NewRootDeleteAction(resourcedistributionsResource, name), &v1alpha1.ResourceDistribution{})
+		Invokes(testing.NewRootDeleteActionWithOptions(resourcedistributionsResource, name, opts), &v1alpha1.ResourceDistribution{})
 	return err
 }
 

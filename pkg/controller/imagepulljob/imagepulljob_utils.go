@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	utilpointer "k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -94,7 +95,7 @@ func getImagePullPolicy(job *appsv1alpha1.ImagePullJob) *appsv1alpha1.ImageTagPu
 	}
 	if job.Spec.CompletionPolicy.Type == appsv1alpha1.Never {
 		pullPolicy.TTLSecondsAfterFinished = getTTLSecondsForNever()
-		pullPolicy.ActiveDeadlineSeconds = getActiveDeadlineSecondsForNever()
+		pullPolicy.ActiveDeadlineSeconds = getActiveDeadlineSecondsForNever(job)
 	} else {
 		pullPolicy.TTLSecondsAfterFinished = getTTLSecondsForAlways(job)
 		pullPolicy.ActiveDeadlineSeconds = job.Spec.CompletionPolicy.ActiveDeadlineSeconds
@@ -108,9 +109,15 @@ func getTTLSecondsForNever() *int32 {
 	return &ret
 }
 
-func getActiveDeadlineSecondsForNever() *int64 {
+func getActiveDeadlineSecondsForNever(job *appsv1alpha1.ImagePullJob) *int64 {
+	if job.Spec.PullPolicy != nil && job.Spec.PullPolicy.TimeoutSeconds != nil &&
+		int64(*job.Spec.PullPolicy.TimeoutSeconds) > defaultActiveDeadlineSecondsForNever {
+
+		ret := int64(*job.Spec.PullPolicy.TimeoutSeconds)
+		return utilpointer.Int64(ret)
+	}
 	var ret = defaultActiveDeadlineSecondsForNever
-	return &ret
+	return utilpointer.Int64(ret)
 }
 
 func containsObject(slice []appsv1alpha1.ReferenceObject, obj appsv1alpha1.ReferenceObject) bool {
@@ -151,14 +158,18 @@ func targetFromSource(source *v1.Secret, keySet referenceSet) *v1.Secret {
 	target.ObjectMeta = metav1.ObjectMeta{
 		Namespace:    util.GetKruiseDaemonConfigNamespace(),
 		GenerateName: fmt.Sprintf("%s-", source.Name),
-		Labels: map[string]string{
-			SourceSecretUIDLabelKey: string(source.UID),
-		},
-		Annotations: map[string]string{
-			SourceSecretKeyAnno:       keyFromObject(source).String(),
-			TargetOwnerReferencesAnno: keySet.String(),
-		},
+		Labels:       source.Labels,
+		Annotations:  source.Annotations,
 	}
+	if target.Labels == nil {
+		target.Labels = map[string]string{}
+	}
+	target.Labels[SourceSecretUIDLabelKey] = string(source.UID)
+	if target.Annotations == nil {
+		target.Annotations = map[string]string{}
+	}
+	target.Annotations[SourceSecretKeyAnno] = keyFromObject(source).String()
+	target.Annotations[TargetOwnerReferencesAnno] = keySet.String()
 	return target
 }
 
@@ -176,7 +187,7 @@ func referenceSetFromTarget(target *v1.Secret) referenceSet {
 	for _, ref := range refs {
 		namespace, name, err := cache.SplitMetaNamespaceKey(ref)
 		if err != nil {
-			klog.Errorf("Failed to parse job key from target secret %s annotations: %v", target.Name, err)
+			klog.ErrorS(err, "Failed to parse job key from annotations in target Secret", "secret", klog.KObj(target))
 			continue
 		}
 		keys.Insert(types.NamespacedName{Namespace: namespace, Name: name})

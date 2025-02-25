@@ -8,10 +8,13 @@ on:
   pull_request: {}
   workflow_dispatch: {}
 
+# Declare default permissions as read only.
+permissions: read-all
+
 env:
   # Common versions
-  GO_VERSION: '1.19'
-  GOLANGCI_VERSION: 'v1.51'
+  GO_VERSION: '1.22'
+  GOLANGCI_VERSION: 'v1.55.2'
   DOCKER_BUILDX_VERSION: 'v0.4.2'
 
   # Common users. We can't run a step 'if secrets.AWS_USR != ""' but we can run
@@ -26,25 +29,27 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout Actions Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Check spelling with custom config file
-        uses: crate-ci/typos@v1.13.10
+        uses: crate-ci/typos@11ca4583f2f3f74c7e7785c0ecb20fe2c99a4308 # v1.29.5
         with:
           config: ./typos.toml
 
   golangci-lint:
     runs-on: ubuntu-20.04
+    permissions:
+      security-events: write
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
       - name: Setup Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Cache Go Dependencies
-        uses: actions/cache@v2
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -53,14 +58,14 @@ jobs:
         run: |
           make generate
       - name: Lint golang code
-        uses: golangci/golangci-lint-action@v3.5.0
+        uses: golangci/golangci-lint-action@2226d7cb06a077cd73e56eedd38eecad18e5d837 # v6.5.0
         with:
           version: ${{ env.GOLANGCI_VERSION }}
           args: --verbose
           skip-pkg-cache: true
           mod: readonly
       - name: Run Trivy vulnerability scanner in repo mode
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@d2a392a13760cb64cb6bbd31d4bed2a7d9a5298d # master
         with:
           scan-type: 'fs'
           ignore-unfixed: true
@@ -68,24 +73,25 @@ jobs:
           output: 'trivy-results.sarif'
           severity: 'CRITICAL'
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@dd746615b3b9d728a6a37ca2045b68ca76d4841a # v3.28.8
         with:
           sarif_file: 'trivy-results.sarif'
 
-  markdownlint-misspell-shellcheck:
-    runs-on: ubuntu-20.04
-    # this image is build from Dockerfile
-    # https://github.com/pouchcontainer/pouchlinter/blob/master/Dockerfile
-    container: pouchcontainer/pouchlinter:v0.1.2
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Run misspell
-        run: find  ./* -name  "*"  | grep -v vendor | xargs misspell -error
-      - name: Run shellcheck
-        run: find ./ -name "*.sh" | grep -v vendor | xargs shellcheck
-      - name: Lint markdown files
-        run: find  ./ -name  "*.md" | grep -v vendor | grep -v commandline |  grep -v .github |  grep -v swagger |  grep -v api |  xargs mdl -r ~MD010,~MD013,~MD014,~MD022,~MD024,~MD029,~MD031,~MD032,~MD033,~MD036
+#  markdownlint-misspell-shellcheck:
+#    runs-on: ubuntu-20.04
+#    # this image is build from Dockerfile
+#    # https://github.com/pouchcontainer/pouchlinter/blob/master/Dockerfile
+#    container: pouchcontainer/pouchlinter:v0.1.2
+#    steps:
+#      - name: Checkout
+#        uses: actions/checkout@v3
+#      - name: Run misspell
+#        run: find  ./* -name  "*"  | grep -v vendor | xargs misspell -error
+#      - name: Run shellcheck
+#        run: find ./ -name "*.sh" | grep -v vendor | xargs shellcheck
+#      - name: Lint markdown files
+#        run: find  ./ -name  "*.md" | grep -v vendor | grep -v commandline |  grep -v .github |  grep -v swagger |  grep -v api |  xargs mdl -r ~MD010,~MD013,~MD014,~MD022,~MD024,~MD029,~MD031,~MD032,~MD033,~MD036
+
 #      - name: Check markdown links
 #        run: |
 #          set +e
@@ -102,17 +108,17 @@ jobs:
   unit-tests:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
       - name: Fetch History
         run: git fetch --prune --unshallow
       - name: Setup Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Cache Go Dependencies
-        uses: actions/cache@v2
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -122,9 +128,10 @@ jobs:
           make test
           git status
       - name: Publish Unit Test Coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@13ce06bfc6bbe3ecf90edbbf1bc32fe5978ca1d3 # v5.3.1
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           flags: unittests
           file: cover.out
-      - name: Check diff
-        run: '[[ -z $(git status -s) ]] || (printf "Existing modified/untracked files.\nPlease run \"make generate manifests\" and push again.\n"; exit 1)'

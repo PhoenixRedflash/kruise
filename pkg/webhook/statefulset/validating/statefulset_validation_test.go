@@ -20,15 +20,27 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	appspub "github.com/openkruise/kruise/apis/apps/pub"
-	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
+	"github.com/stretchr/testify/assert"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	utilpointer "k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 )
 
 func TestValidateStatefulSet(t *testing.T) {
@@ -77,7 +89,7 @@ func TestValidateStatefulSet(t *testing.T) {
 	var val2 int32 = 2
 	var val3 int32 = 3
 	var minus1 int32 = -1
-	maxUnavailable1 := intstr.FromInt(1)
+	maxUnavailable1 := intstr.FromInt32(1)
 	maxUnavailable120Percent := intstr.FromString("120%")
 	successCases := []appsv1beta1.StatefulSet{
 		{
@@ -130,7 +142,7 @@ func TestValidateStatefulSet(t *testing.T) {
 							Partition:       &val2,
 							PodUpdatePolicy: appsv1beta1.RecreatePodUpdateStrategyType,
 							MaxUnavailable:  &maxUnavailable1,
-							MinReadySeconds: utilpointer.Int32Ptr(10),
+							MinReadySeconds: ptr.To[int32](10),
 						}
 					}()},
 			},
@@ -371,7 +383,7 @@ func TestValidateStatefulSet(t *testing.T) {
 							Partition:       &minus1,
 							PodUpdatePolicy: appsv1beta1.RecreatePodUpdateStrategyType,
 							MaxUnavailable:  &maxUnavailable1,
-							MinReadySeconds: utilpointer.Int32Ptr(1),
+							MinReadySeconds: ptr.To[int32](1),
 						}
 					}()},
 			},
@@ -388,7 +400,7 @@ func TestValidateStatefulSet(t *testing.T) {
 						Partition:       &minus1,
 						PodUpdatePolicy: appsv1beta1.RecreatePodUpdateStrategyType,
 						MaxUnavailable:  &maxUnavailable1,
-						MinReadySeconds: utilpointer.Int32Ptr(-1),
+						MinReadySeconds: ptr.To[int32](-1),
 					},
 				},
 			},
@@ -405,7 +417,7 @@ func TestValidateStatefulSet(t *testing.T) {
 						Partition:       &minus1,
 						PodUpdatePolicy: appsv1beta1.RecreatePodUpdateStrategyType,
 						MaxUnavailable:  &maxUnavailable1,
-						MinReadySeconds: utilpointer.Int32Ptr(appsv1beta1.MaxMinReadySeconds + 1),
+						MinReadySeconds: ptr.To[int32](appsv1beta1.MaxMinReadySeconds + 1),
 					},
 				},
 			},
@@ -451,27 +463,27 @@ func TestValidateStatefulSet(t *testing.T) {
 			}
 
 			for i := range errs {
-				field := errs[i].Field
-				if !strings.HasPrefix(field, "spec.template.") &&
-					field != "metadata.name" &&
-					field != "metadata.namespace" &&
-					field != "spec.selector" &&
-					field != "spec.template" &&
-					field != "GCEPersistentDisk.ReadOnly" &&
-					field != "spec.replicas" &&
-					field != "spec.template.labels" &&
-					field != "metadata.annotations" &&
-					field != "metadata.labels" &&
-					field != "status.replicas" &&
-					field != "spec.updateStrategy" &&
-					field != "spec.updateStrategy.rollingUpdate" &&
-					field != "spec.updateStrategy.rollingUpdate.partition" &&
-					field != "spec.updateStrategy.rollingUpdate.maxUnavailable" &&
-					field != "spec.updateStrategy.rollingUpdate.minReadySeconds" &&
-					field != "spec.updateStrategy.rollingUpdate.podUpdatePolicy" &&
-					field != "spec.template.spec.readinessGates" &&
-					field != "spec.podManagementPolicy" &&
-					field != "spec.template.spec.activeDeadlineSeconds" {
+				f := errs[i].Field
+				if !strings.HasPrefix(f, "spec.template.") &&
+					f != "metadata.name" &&
+					f != "metadata.namespace" &&
+					f != "spec.selector" &&
+					f != "spec.template" &&
+					f != "GCEPersistentDisk.ReadOnly" &&
+					f != "spec.replicas" &&
+					f != "spec.template.labels" &&
+					f != "metadata.annotations" &&
+					f != "metadata.labels" &&
+					f != "status.replicas" &&
+					f != "spec.updateStrategy" &&
+					f != "spec.updateStrategy.rollingUpdate" &&
+					f != "spec.updateStrategy.rollingUpdate.partition" &&
+					f != "spec.updateStrategy.rollingUpdate.maxUnavailable" &&
+					f != "spec.updateStrategy.rollingUpdate.minReadySeconds" &&
+					f != "spec.updateStrategy.rollingUpdate.podUpdatePolicy" &&
+					f != "spec.template.spec.readinessGates" &&
+					f != "spec.podManagementPolicy" &&
+					f != "spec.template.spec.activeDeadlineSeconds" {
 					t.Errorf("%s: missing prefix for: %v", k, errs[i])
 				}
 			}
@@ -514,7 +526,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 			Spec: v1.PersistentVolumeClaimSpec{
 				StorageClassName: utilpointer.String("foo/bar"),
 				AccessModes:      []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
-				Resources: v1.ResourceRequirements{Requests: map[v1.ResourceName]resource.Quantity{
+				Resources: v1.VolumeResourceRequirements{Requests: map[v1.ResourceName]resource.Quantity{
 					v1.ResourceStorage: resource.MustParse(size),
 				}},
 			},
@@ -533,16 +545,18 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ResourceVersion: "1",
 				},
 				Spec: appsv1beta1.StatefulSetSpec{
-					Replicas:             utilpointer.Int32Ptr(5),
-					RevisionHistoryLimit: utilpointer.Int32Ptr(5),
-					ReserveOrdinals:      []int{1},
+					Replicas:             ptr.To[int32](5),
+					RevisionHistoryLimit: ptr.To[int32](5),
+					ReserveOrdinals: []intstr.IntOrString{
+						intstr.FromInt32(1),
+					},
 					Lifecycle:            &appspub.Lifecycle{PreDelete: &appspub.LifecycleHook{FinalizersHandler: []string{"foo/bar"}}},
 					Template:             validPodTemplate1.Template,
 					VolumeClaimTemplates: []v1.PersistentVolumeClaim{validVolumeClaimTemplate("30Gi")},
 					ScaleStrategy:        &appsv1beta1.StatefulSetScaleStrategy{MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 1}},
 					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
 						Type:          apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{Partition: utilpointer.Int32Ptr(5)},
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](5)},
 					},
 					PersistentVolumeClaimRetentionPolicy: &appsv1beta1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 						WhenScaled:  appsv1beta1.RetainPersistentVolumeClaimRetentionPolicyType,
@@ -557,16 +571,18 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ResourceVersion: "1",
 				},
 				Spec: appsv1beta1.StatefulSetSpec{
-					Replicas:             utilpointer.Int32Ptr(10),
-					RevisionHistoryLimit: utilpointer.Int32Ptr(10),
-					ReserveOrdinals:      []int{2},
+					Replicas:             ptr.To[int32](10),
+					RevisionHistoryLimit: ptr.To[int32](10),
+					ReserveOrdinals: []intstr.IntOrString{
+						intstr.FromInt32(2),
+					},
 					Lifecycle:            &appspub.Lifecycle{PreDelete: &appspub.LifecycleHook{FinalizersHandler: []string{"foo/hello"}}},
 					Template:             validPodTemplate2.Template,
 					VolumeClaimTemplates: []v1.PersistentVolumeClaim{validVolumeClaimTemplate("60Gi")},
 					ScaleStrategy:        &appsv1beta1.StatefulSetScaleStrategy{MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 2}},
 					UpdateStrategy: appsv1beta1.StatefulSetUpdateStrategy{
 						Type:          apps.RollingUpdateStatefulSetStrategyType,
-						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{Partition: utilpointer.Int32Ptr(10)},
+						RollingUpdate: &appsv1beta1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](10)},
 					},
 					PersistentVolumeClaimRetentionPolicy: &appsv1beta1.StatefulSetPersistentVolumeClaimRetentionPolicy{
 						WhenScaled:  appsv1beta1.RetainPersistentVolumeClaimRetentionPolicyType,
@@ -600,7 +616,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					PodManagementPolicy: "",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -614,7 +630,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					PodManagementPolicy: "",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "bar"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -631,7 +647,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ServiceName:         "foo",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -646,7 +662,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ServiceName:         "bar",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -663,7 +679,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ServiceName:         "bar",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -678,7 +694,7 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 					ServiceName:         "bar",
 					Selector:            &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 					Template:            validPodTemplate1.Template,
-					Replicas:            utilpointer.Int32Ptr(1),
+					Replicas:            ptr.To[int32](1),
 					UpdateStrategy:      appsv1beta1.StatefulSetUpdateStrategy{Type: apps.RollingUpdateStatefulSetStrategyType},
 				},
 			},
@@ -695,8 +711,8 @@ func TestValidateStatefulSetUpdate(t *testing.T) {
 			}
 
 			for i := range errs {
-				field := errs[i].Field
-				if field != "spec" {
+				f := errs[i].Field
+				if f != "spec" {
 					t.Errorf("%s: missing prefix for: %v", k, errs[i])
 				}
 			}
@@ -712,5 +728,468 @@ func setTestDefault(obj *appsv1beta1.StatefulSet) {
 	if obj.Spec.RevisionHistoryLimit == nil {
 		obj.Spec.RevisionHistoryLimit = new(int32)
 		*obj.Spec.RevisionHistoryLimit = 0
+	}
+}
+
+var (
+	testScheme *runtime.Scheme
+)
+
+func init() {
+	testScheme = k8sruntime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(testScheme))
+	utilruntime.Must(storagev1.AddToScheme(testScheme))
+	utilruntime.Must(appsv1alpha1.AddToScheme(testScheme))
+}
+
+func newFakeStorageClass(name string, allowExpansion, isDefault bool) *storagev1.StorageClass {
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		AllowVolumeExpansion: &allowExpansion,
+	}
+	if isDefault {
+		sc.Annotations = map[string]string{
+			isDefaultStorageClassAnnotation: "true",
+		}
+	}
+	return sc
+}
+
+func TestValidateVolumeClaimTemplateUpdate(t *testing.T) {
+	allowExpandSC := newFakeStorageClass("allowExpand", true, false)
+	disallowExpandSC := newFakeStorageClass("disallowExpand", false, false)
+	fakeClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(allowExpandSC, disallowExpandSC).Build()
+
+	tests := []struct {
+		name           string
+		sts            *appsv1beta1.StatefulSet
+		oldSts         *appsv1beta1.StatefulSet
+		expectedErrors bool
+	}{
+		{
+			name: "no update strategy and change sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &allowExpandSC.Name},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &disallowExpandSC.Name},
+						},
+					},
+				},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "on delete update strategy and change sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPVCDeleteVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &allowExpandSC.Name},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &disallowExpandSC.Name},
+						},
+					},
+				},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "on pod rolling update strategy and change sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &allowExpandSC.Name},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec:       v1.PersistentVolumeClaimSpec{StorageClassName: &disallowExpandSC.Name},
+						},
+					},
+				},
+			},
+			expectedErrors: true,
+		},
+		{
+			name: "on pod rolling update strategy and expand size with expansion allowed sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("3Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("2Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "on pod rolling update strategy and expand size with expansion disallowed sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &disallowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("3Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &disallowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("2Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrors: true,
+		},
+		{
+			name: "onDelete update strategy and expand size",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPVCDeleteVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("3Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("2Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "on pod rolling update strategy and scale down size with expansion allowed sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("2Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &allowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("3Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "on pod rolling update strategy and scale down size with expansion disallowed sc",
+			sts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimUpdateStrategy: appsv1beta1.VolumeClaimUpdateStrategy{
+						Type: appsv1beta1.OnPodRollingUpdateVolumeClaimUpdateStrategyType,
+					},
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &disallowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("2Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldSts: &appsv1beta1.StatefulSet{
+				Spec: appsv1beta1.StatefulSetSpec{
+					VolumeClaimTemplates: []v1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "pvc-1"},
+							Spec: v1.PersistentVolumeClaimSpec{
+								StorageClassName: &disallowExpandSC.Name,
+								Resources: v1.VolumeResourceRequirements{
+									Requests: map[v1.ResourceName]resource.Quantity{
+										v1.ResourceStorage: resource.MustParse("3Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedErrors: true,
+		},
+		// Add more test cases here
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := ValidateVolumeClaimTemplateUpdate(fakeClient, tt.sts, tt.oldSts)
+			hasErrors := len(errs) > 0
+			if hasErrors {
+				t.Log(errs.ToAggregate())
+			}
+			if tt.expectedErrors != hasErrors {
+				t.Errorf("TestValidateVolumeClaimTemplateUpdate(%s) expected errors: %v, got: %v", tt.name, tt.expectedErrors, hasErrors)
+			}
+		})
+	}
+}
+
+func TestGetDefaultStorageClass(t *testing.T) {
+	// Create StorageClass objects to use in the test.
+	newSCWithCreateTime := func(name string, allowExpansion, isDefault bool, createTime time.Time) *storagev1.StorageClass {
+		sc := newFakeStorageClass(name, allowExpansion, isDefault)
+		sc.CreationTimestamp = metav1.NewTime(createTime)
+		return sc
+	}
+	tests := []struct {
+		name      string
+		scs       []*storagev1.StorageClass
+		expected  *storagev1.StorageClass
+		expectNil bool
+	}{
+		{
+			name:      "no storage class",
+			scs:       []*storagev1.StorageClass{},
+			expected:  nil,
+			expectNil: true,
+		},
+		{
+			name: "no default storage class",
+			scs: []*storagev1.StorageClass{
+				newFakeStorageClass("sc1", true, false),
+				newFakeStorageClass("sc2", true, false),
+			},
+			expected:  nil,
+			expectNil: true,
+		},
+		{
+			name: "only one default storage class",
+			scs: []*storagev1.StorageClass{
+				newFakeStorageClass("sc1", true, true),
+				newFakeStorageClass("sc2", true, false),
+			},
+			expected:  newFakeStorageClass("sc1", true, true),
+			expectNil: false,
+		},
+		{
+			name: "multi default storage classes",
+			scs: []*storagev1.StorageClass{
+				newSCWithCreateTime("sc1", true, true, time.Now().Add(time.Hour)),
+				newSCWithCreateTime("sc2", true, true, time.Now()),
+				newSCWithCreateTime("sc3", true, true, time.Now().Add(-time.Hour)),
+			},
+			expected:  newFakeStorageClass("sc1", true, true),
+			expectNil: false,
+		},
+	}
+
+	for _, tt := range tests {
+		// Create a fake client to mock API calls.
+		builder := fake.NewClientBuilder().WithScheme(testScheme)
+		for _, sc := range tt.scs {
+			builder.WithObjects(sc)
+		}
+		client := builder.Build()
+
+		// Test the GetDefaultStorageClass function.
+		defaultSC, err := GetDefaultStorageClass(client)
+		assert.NoError(t, err)
+		if tt.expectNil {
+			assert.Nil(t, defaultSC)
+		} else {
+			assert.NotNil(t, defaultSC)
+			assert.Equal(t, tt.expected.Name, defaultSC.Name)
+		}
+
+	}
+
+}
+
+func TestValidateReserveOrdinals(t *testing.T) {
+	tests := []struct {
+		name            string
+		reserveOrdinals []intstr.IntOrString
+		expectedErrors  bool
+	}{
+		{
+			name:            "EmptyReserveOrdinals",
+			reserveOrdinals: []intstr.IntOrString{},
+			expectedErrors:  false,
+		},
+		{
+			name: "ValidStringRange",
+			reserveOrdinals: []intstr.IntOrString{
+				{Type: intstr.String, StrVal: "1-2"},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "InvalidStringRange",
+			reserveOrdinals: []intstr.IntOrString{
+				{Type: intstr.String, StrVal: "12"},
+			},
+			expectedErrors: true,
+		},
+		{
+			name: "ValidIntRange",
+			reserveOrdinals: []intstr.IntOrString{
+				{Type: intstr.Int, IntVal: 1},
+			},
+			expectedErrors: false,
+		},
+		{
+			name: "NegativeIntRange",
+			reserveOrdinals: []intstr.IntOrString{
+				{Type: intstr.Int, IntVal: -1},
+			},
+			expectedErrors: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec := &appsv1beta1.StatefulSetSpec{
+				ReserveOrdinals: test.reserveOrdinals,
+			}
+			fldPath := field.NewPath("spec")
+			errs := validateReserveOrdinals(spec, fldPath)
+			if len(errs) > 0 != test.expectedErrors {
+				t.Errorf("validateReserveOrdinals(%v) = %v, want %v", test.reserveOrdinals, errs, test.expectedErrors)
+			}
+		})
 	}
 }

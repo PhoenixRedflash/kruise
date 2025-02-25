@@ -36,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	appsvalidation "k8s.io/kubernetes/pkg/apis/apps/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -49,7 +48,7 @@ type PodUnavailableBudgetCreateUpdateHandler struct {
 	Client client.Client
 
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
 var _ admission.Handler = &PodUnavailableBudgetCreateUpdateHandler{}
@@ -95,9 +94,9 @@ func (h *PodUnavailableBudgetCreateUpdateHandler) validatingPodUnavailableBudget
 			}
 		}
 	}
-	if replicasValue, ok := obj.Annotations[policyv1alpha1.PubProtectTotalReplicas]; ok {
+	if replicasValue, ok := obj.Annotations[policyv1alpha1.PubProtectTotalReplicasAnnotation]; ok {
 		if _, err := strconv.ParseInt(replicasValue, 10, 32); err != nil {
-			allErrs = append(allErrs, field.InternalError(field.NewPath("metadata"), fmt.Errorf("annotation[%s] is invalid", policyv1alpha1.PubProtectTotalReplicas)))
+			allErrs = append(allErrs, field.InternalError(field.NewPath("metadata"), fmt.Errorf("annotation[%s] is invalid", policyv1alpha1.PubProtectTotalReplicasAnnotation)))
 		}
 	}
 
@@ -143,7 +142,7 @@ func validatePodUnavailableBudgetSpec(obj *policyv1alpha1.PodUnavailableBudget, 
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("TargetReference"), spec.TargetReference, err.Error()))
 		}
 	} else {
-		allErrs = append(allErrs, metavalidation.ValidateLabelSelector(spec.Selector, fldPath.Child("selector"))...)
+		allErrs = append(allErrs, metavalidation.ValidateLabelSelector(spec.Selector, metavalidation.LabelSelectorValidationOptions{}, fldPath.Child("selector"))...)
 		if len(spec.Selector.MatchLabels)+len(spec.Selector.MatchExpressions) == 0 {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, "empty selector is not valid for PodUnavailableBudget."))
 		}
@@ -195,20 +194,4 @@ func validatePubConflict(pub *policyv1alpha1.PodUnavailableBudget, others []poli
 		}
 	}
 	return allErrs
-}
-
-var _ inject.Client = &PodUnavailableBudgetCreateUpdateHandler{}
-
-// InjectClient injects the client into the PodUnavailableBudgetCreateUpdateHandler
-func (h *PodUnavailableBudgetCreateUpdateHandler) InjectClient(c client.Client) error {
-	h.Client = c
-	return nil
-}
-
-var _ admission.DecoderInjector = &PodUnavailableBudgetCreateUpdateHandler{}
-
-// InjectDecoder injects the decoder into the PodUnavailableBudgetCreateUpdateHandler
-func (h *PodUnavailableBudgetCreateUpdateHandler) InjectDecoder(d *admission.Decoder) error {
-	h.Decoder = d
-	return nil
 }

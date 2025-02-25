@@ -21,22 +21,23 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/openkruise/kruise/pkg/util"
-	"github.com/openkruise/kruise/pkg/webhook/util/deletionprotection"
 	admissionv1 "k8s.io/api/admission/v1"
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/openkruise/kruise/pkg/util"
+	"github.com/openkruise/kruise/pkg/webhook/util/deletionprotection"
 )
 
 // WorkloadHandler handles built-in workloads, e.g. Deployment, ReplicaSet, StatefulSet
 type WorkloadHandler struct {
 	// Decoder decodes objects
-	Decoder *admission.Decoder
+	Decoder admission.Decoder
 }
 
-func (h *WorkloadHandler) InjectDecoder(d *admission.Decoder) error {
+func (h *WorkloadHandler) InjectDecoder(d admission.Decoder) error {
 	h.Decoder = d
 	return nil
 }
@@ -47,7 +48,7 @@ func (h *WorkloadHandler) Handle(ctx context.Context, req admission.Request) adm
 		return admission.ValidationResponse(true, "")
 	}
 	if len(req.OldObject.Raw) == 0 {
-		klog.Warningf("Skip to validate %s %s/%s for no old object, maybe because of Kubernetes version < 1.16", req.Kind.Kind, req.Namespace, req.Name)
+		klog.InfoS("Skip to validate for no old object, maybe because of Kubernetes version < 1.16", "kind", req.Kind.Kind, "namespace", req.Namespace, "name", req.Name)
 		return admission.ValidationResponse(true, "")
 	}
 
@@ -76,7 +77,7 @@ func (h *WorkloadHandler) Handle(ctx context.Context, req admission.Request) adm
 		metaObj = obj
 		replicas = obj.Spec.Replicas
 	default:
-		klog.Warningf("Skip to validate %s %s/%s for unsupported resource", req.Kind.Kind, req.Namespace, req.Name)
+		klog.InfoS("Skip to validate for unsupported resource", "kind", req.Kind.Kind, "namespace", req.Namespace, "name", req.Name)
 		return admission.ValidationResponse(true, "")
 	}
 
